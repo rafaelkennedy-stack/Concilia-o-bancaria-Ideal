@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:8080/)",
+      "Skill(claude-api)",
+      "Bash(node -e \"console.log\\(require\\('@anthropic-ai/sdk/package.json'\\).version\\)\")",
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(node -e \"require\\('dotenv'\\).config\\({path:'.env.local'}\\); console.log\\('KEY:', process.env.ANTHROPIC_API_KEY ? 'presente' : 'AUSENTE'\\)\")",
+      "Bash(grep -oE \"export \\\\{[^}]*\\\\}|DropdownMenu[A-Za-z]+,\" src/components/ui/dropdown-menu.tsx)",
+      "Bash(curl -s -o /dev/null -w \"landing HTTP %{http_code}\\\\n\" http://localhost:8080/)",
+      "Bash(curl -s -o /dev/null -w \"fila route HTTP %{http_code}\\\\n\" http://localhost:8080/conciliacao/fila)",
+      "Bash(npx eslint *)",
+      "Bash(pkill -f \"npm run dev\")",
+      "Bash(pkill -f \"vite dev\")",
+      "Bash(tail -5 \"/private/tmp/claude-501/-Users-rafae-Downloads-Bank-Reconciliation-Wizard/819c530b-ca29-4b07-a166-9315348f6103/tasks/b606aq2k7.output\")",
+      "Bash(curl -s -o /dev/null -w \"app HTTP %{http_code}\\\\n\" http://localhost:8080/)"
+    ]
+  }
+}
