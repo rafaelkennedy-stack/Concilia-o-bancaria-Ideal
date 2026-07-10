@@ -532,6 +532,91 @@ export const reopenReconciliation = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+// Reabre uma conciliação SUBSTITUINDO seus lançamentos/casamentos pelos extraídos
+// de novos extratos. Apenas o Diretor pode executar. Ação destrutiva: apaga todos
+// os reconciliation_entries e reconciliation_matches antes de reprocessar.
+export const reopenWithNewFiles = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({
+    reconciliationId: z.string().uuid(),
+    bbFileName: z.string(),
+    bbText: z.string().min(1),
+    agrotisFileName: z.string(),
+    agrotisText: z.string().min(1),
+    balanceBank: z.number().nullable().optional(),
+    balanceAgrotisPrevious: z.number().nullable().optional(),
+  }).parse(d))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { data: isDir } = await supabase.rpc("has_role", { _user_id: userId, _role: "diretor" });
+    if (!isDir) throw new Error("Apenas o Diretor pode reabrir conciliações.");
+
+    const { data: rec, error: rErr } = await supabase.from("reconciliations")
+      .select("id").eq("id", data.reconciliationId).single();
+    if (rErr || !rec) throw new Error(rErr?.message || "Conciliação não encontrada");
+
+    // Extrai os novos lançamentos ANTES de apagar os antigos: se a IA falhar,
+    // a conciliação permanece intacta.
+    const parsed = await extractReconciliation(data.bbText, data.agrotisText);
+
+    // Apaga casamentos e lançamentos atuais. (Apagar os lançamentos já removeria
+    // os casamentos por cascade, mas removemos os matches explicitamente primeiro
+    // para cobrir também os de lado único, no_pair.)
+    const { error: delMErr } = await supabase.from("reconciliation_matches")
+      .delete().eq("reconciliation_id", rec.id);
+    if (delMErr) throw new Error(delMErr.message);
+    const { error: delEErr } = await supabase.from("reconciliation_entries")
+      .delete().eq("reconciliation_id", rec.id);
+    if (delEErr) throw new Error(delEErr.message);
+
+    // Reinsere lançamentos e sugestões (mesma lógica de processReconciliation).
+    const bbInserts = parsed.bb_entries.map((e) => ({ reconciliation_id: rec.id, source: "bb" as const, ...e }));
+    const agInserts = parsed.agrotis_entries.map((e) => ({ reconciliation_id: rec.id, source: "agrotis" as const, ...e }));
+    const { data: bbRows, error: bbErr } = await supabase.from("reconciliation_entries").insert(bbInserts).select();
+    if (bbErr) throw new Error(bbErr.message);
+    const { data: agRows, error: agErr } = await supabase.from("reconciliation_entries").insert(agInserts).select();
+    if (agErr) throw new Error(agErr.message);
+
+    const matchInserts = parsed.matches
+      .filter((m) => bbRows?.[m.bb_index] && agRows?.[m.agrotis_index])
+      .map((m) => ({
+        reconciliation_id: rec.id,
+        bb_entry_id: bbRows![m.bb_index].id,
+        agrotis_entry_id: agRows![m.agrotis_index].id,
+        confidence: m.confidence,
+        status: "suggested" as const,
+        reason: m.reason,
+      }));
+    if (matchInserts.length) {
+      const { error: mErr } = await supabase.from("reconciliation_matches").insert(matchInserts);
+      if (mErr) throw new Error(mErr.message);
+    }
+
+    // Reabre e atualiza arquivos/saldos. O saldo calculado do Agrotis é zerado
+    // para ser recomputado no próximo fechamento com os novos lançamentos.
+    const { error: updErr } = await supabase.from("reconciliations").update({
+      status: "reaberta",
+      reopened_at: new Date().toISOString(),
+      reopened_by: userId,
+      bb_file_name: data.bbFileName,
+      agrotis_file_name: data.agrotisFileName,
+      balance_bank: data.balanceBank ?? null,
+      balance_agrotis_previous: data.balanceAgrotisPrevious ?? null,
+      balance_agrotis_calculated: null,
+    }).eq("id", data.reconciliationId);
+    if (updErr) throw new Error(updErr.message);
+
+    await supabase.from("reconciliation_audit_log").insert({
+      reconciliation_id: data.reconciliationId, user_id: userId, action: "reopened_with_new_files",
+      details: {
+        bb_file: data.bbFileName, agrotis_file: data.agrotisFileName,
+        bb: bbRows?.length, agrotis: agRows?.length, matches: matchInserts.length,
+      },
+    });
+
+    return { reconciliationId: rec.id };
+  });
+
 // ---- Fila diária de conciliação (daily_account_status) ----
 
 // Marca a conta como "sem movimento" no dia, registrando o motivo.

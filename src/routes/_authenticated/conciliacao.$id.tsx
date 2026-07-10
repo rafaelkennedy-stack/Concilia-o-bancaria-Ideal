@@ -15,15 +15,16 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { ArrowLeft, Check, Search, Lock, Unlock, X, AlertTriangle, Network, ClipboardList, Printer, Layers } from "lucide-react";
+import { ArrowLeft, Check, Search, Lock, Unlock, X, AlertTriangle, Network, ClipboardList, Printer, Layers, Upload } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useState } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   confirmMatch, manualMatch, justifyNoPair, closeReconciliation, reopenReconciliation,
-  reassignMatch, rejectSuggestion, confirmGroupedMatch, closeMassReconciliation,
+  reassignMatch, rejectSuggestion, confirmGroupedMatch, closeMassReconciliation, reopenWithNewFiles,
 } from "@/lib/reconciliation.functions";
+import { parseExcel, parsePdf, extractBankBalance, extractAgrotisPrevious } from "@/lib/file-extract";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/$id")({
   component: Detail,
@@ -170,10 +171,6 @@ function Detail() {
       toast.error("Não foi possível fechar", { description: (e as Error).message });
     }
   }
-  async function doReopen() {
-    try { await reopenFn({ data: { reconciliationId: id } }); toast.success("Conciliação reaberta."); qc.invalidateQueries({ queryKey: ["reconciliation", id] }); }
-    catch (e) { toast.error((e as Error).message); }
-  }
   async function doReopenPrevious() {
     if (!prevIdToReopen) return;
     try {
@@ -273,21 +270,7 @@ function Detail() {
             </>
           )}
           {isClosed && isDiretor && (
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button variant="outline"><Unlock className="mr-1 h-4 w-4" /> Reabrir</Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Reabrir conciliação?</AlertDialogTitle>
-                  <AlertDialogDescription>Isso registrará no log de auditoria com seu usuário.</AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                  <AlertDialogAction onClick={doReopen}>Confirmar</AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
+            <ReopenDialog id={id} onReopened={() => qc.invalidateQueries({ queryKey: ["reconciliation", id] })} />
           )}
         </div>
       </div>
@@ -848,6 +831,94 @@ function PendingEntryRow({ e }: { e: Entry }) {
         {fmtEntryAmount(e)}
       </span>
     </div>
+  );
+}
+
+function ReopenFileField({ label, accept, file, onChange, disabled }: {
+  label: string; accept: string; file: File | null; onChange: (f: File | null) => void; disabled?: boolean;
+}) {
+  return (
+    <div>
+      <div className="mb-1 text-sm font-medium">{label}</div>
+      <label className={`flex items-center justify-between rounded-md border border-dashed px-3 py-3 text-sm ${disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-accent/40"}`}>
+        <span className="flex items-center gap-2 text-muted-foreground">
+          <Upload className="h-4 w-4" />
+          {file ? file.name : "Selecionar arquivo"}
+        </span>
+        <input type="file" accept={accept} className="sr-only" disabled={disabled}
+          onChange={(e) => onChange(e.target.files?.[0] ?? null)} />
+      </label>
+    </div>
+  );
+}
+
+// Reabrir substituindo os lançamentos/casamentos pelos de novos extratos.
+// Somente Diretor (renderizado apenas nesse caso); a validação de papel também é
+// feita no servidor (reopenWithNewFiles).
+function ReopenDialog({ id, onReopened }: { id: string; onReopened: () => void }) {
+  const reopenFilesFn = useServerFn(reopenWithNewFiles);
+  const [open, setOpen] = useState(false);
+  const [bb, setBb] = useState<File | null>(null);
+  const [ag, setAg] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    if (!bb || !ag) { toast.error("Envie os dois arquivos."); return; }
+    setBusy(true);
+    try {
+      toast.info("Lendo arquivos…");
+      const [bbText, agrotisText] = await Promise.all([parseExcel(bb), parsePdf(ag)]);
+      if (!bbText?.trim()) throw new Error("Não foi possível extrair texto do Excel BB.");
+      if (!agrotisText?.trim()) throw new Error("Não foi possível extrair texto do PDF Agrotis.");
+      const balanceBank = extractBankBalance(bbText);
+      const balanceAgrotisPrevious = extractAgrotisPrevious(agrotisText);
+      toast.info("Reprocessando com IA…", { description: "Isso pode levar alguns segundos." });
+      await reopenFilesFn({ data: {
+        reconciliationId: id,
+        bbFileName: bb.name, bbText,
+        agrotisFileName: ag.name, agrotisText,
+        balanceBank, balanceAgrotisPrevious,
+      }});
+      toast.success("Conciliação reaberta e reprocessada.");
+      setOpen(false); setBb(null); setAg(null);
+      onReopened();
+    } catch (e) {
+      toast.error("Falha ao reabrir", { description: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!busy) setOpen(o); }}>
+      <DialogTrigger asChild>
+        <Button variant="outline"><Unlock className="mr-1 h-4 w-4" /> Reabrir</Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Reabrir e reprocessar</DialogTitle>
+        </DialogHeader>
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
+          Ao reabrir, todos os lançamentos e casamentos serão substituídos. Esta ação não pode ser desfeita.
+        </div>
+        <ReopenFileField
+          label="Novo extrato BB (.xlsx)"
+          accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          file={bb} onChange={setBb} disabled={busy}
+        />
+        <ReopenFileField
+          label="Novo extrato Agrotis (.pdf)"
+          accept=".pdf,application/pdf"
+          file={ag} onChange={setAg} disabled={busy}
+        />
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>Cancelar</Button>
+          <Button onClick={submit} disabled={busy || !bb || !ag}>
+            {busy ? "Reprocessando…" : <><Unlock className="mr-1 h-4 w-4" /> Reabrir e reprocessar</>}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
