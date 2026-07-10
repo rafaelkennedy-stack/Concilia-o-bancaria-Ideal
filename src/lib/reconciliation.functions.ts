@@ -454,6 +454,10 @@ export const closeReconciliation = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => z.object({
     reconciliationId: z.string().uuid(),
     force: z.boolean().optional(),
+    // Fecha o dia mesmo com sugestões/pendentes ainda em aberto, marcando o
+    // registro com closed_with_pending = true. Os lançamentos suggested/pending
+    // permanecem salvos no banco para tratamento posterior.
+    closedWithPending: z.boolean().optional(),
   }).parse(d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
@@ -487,18 +491,21 @@ export const closeReconciliation = createServerFn({ method: "POST" })
       }
     }
 
+    const closedWithPending = data.closedWithPending ?? false;
     const { error } = await supabase.from("reconciliations")
       .update({
         status: "fechada",
         closed_at: new Date().toISOString(),
         closed_by: userId,
+        closed_with_pending: closedWithPending,
         balance_agrotis_calculated: calculated,
       })
       .eq("id", data.reconciliationId);
     if (error) throw new Error(error.message);
     await supabase.from("reconciliation_audit_log").insert({
-      reconciliation_id: data.reconciliationId, user_id: userId, action: "closed",
-      details: { balance_bank: rec.balance_bank, balance_agrotis_calculated: calculated },
+      reconciliation_id: data.reconciliationId, user_id: userId,
+      action: closedWithPending ? "closed_with_pending" : "closed",
+      details: { balance_bank: rec.balance_bank, balance_agrotis_calculated: calculated, closed_with_pending: closedWithPending },
     });
     return { ok: true };
   });

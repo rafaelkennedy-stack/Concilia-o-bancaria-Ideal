@@ -270,6 +270,7 @@ export type Database = {
           bb_file_name: string | null
           closed_at: string | null
           closed_by: string | null
+          closed_with_pending: boolean
           created_at: string
           created_by: string
           id: string
@@ -289,6 +290,7 @@ export type Database = {
           bb_file_name?: string | null
           closed_at?: string | null
           closed_by?: string | null
+          closed_with_pending?: boolean
           created_at?: string
           created_by: string
           id?: string
@@ -308,6 +310,7 @@ export type Database = {
           bb_file_name?: string | null
           closed_at?: string | null
           closed_by?: string | null
+          closed_with_pending?: boolean
           created_at?: string
           created_by?: string
           id?: string

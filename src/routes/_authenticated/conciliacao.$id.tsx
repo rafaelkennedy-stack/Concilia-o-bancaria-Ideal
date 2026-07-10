@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { ArrowLeft, Check, Search, Lock, Unlock, X, AlertTriangle, Network } from "lucide-react";
+import { ArrowLeft, Check, Search, Lock, Unlock, X, AlertTriangle, Network, ClipboardList, Printer } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useState } from "react";
@@ -121,15 +121,23 @@ function Detail() {
   const allReviewed = strong.length === 0 && medium.length === 0 && unmatched.length === 0;
   const isClosed = rec.status === "fechada";
 
+  // Lançamentos sem par confirmado: os que não participam de nenhum casamento
+  // definitivo (confirmed/manual) nem foram justificados como sem par (no_pair)
+  // — ou seja, exatamente o que resta na aba "Revisão". confirmedEntryIds já
+  // reúne todos os lançamentos presos a um match não-sugerido.
+  const pendingEntries = entries.filter((e) => !confirmedEntryIds.has(e.id));
+  const pendingBB = pendingEntries.filter((e) => e.source === "bb");
+  const pendingAg = pendingEntries.filter((e) => e.source === "agrotis");
+
   async function doConfirm(matchId: string) {
     try { await confirmFn({ data: { matchId } }); toast.success("Confirmado"); qc.invalidateQueries({ queryKey: ["reconciliation", id] }); }
     catch (e) { toast.error((e as Error).message); }
   }
-  async function doClose() {
+  async function doClose(closedWithPending = false) {
     setCloseError(null); setPrevIdToReopen(null);
     try {
-      await closeFn({ data: { reconciliationId: id } });
-      toast.success("Conciliação fechada.");
+      await closeFn({ data: { reconciliationId: id, closedWithPending } });
+      toast.success(closedWithPending ? "Conciliação fechada com pendências." : "Conciliação fechada.");
       qc.invalidateQueries({ queryKey: ["reconciliation", id] });
       // Fluxo da fila diária: ao fechar a conciliação do dia, volta para a fila.
       if (rec.reconciliation_date === new Date().toISOString().slice(0, 10)) {
@@ -177,13 +185,45 @@ function Detail() {
           <Button asChild variant="outline">
             <Link to="/conciliacao/$id/vinculos" params={{ id }}><Network className="mr-1 h-4 w-4" /> Ver vínculos</Link>
           </Button>
+          <PendingReportDialog rec={rec} pendingBB={pendingBB} pendingAg={pendingAg} />
           <Badge className="capitalize" variant={isClosed ? "default" : rec.status === "reaberta" ? "secondary" : "outline"}>
             {rec.status}
           </Badge>
+          {isClosed && rec.closed_with_pending && (
+            <Badge variant="outline" className="border-amber-400 text-amber-700 dark:text-amber-400">
+              com pendências
+            </Badge>
+          )}
           {!isClosed && (
-            <Button disabled={!allReviewed} onClick={doClose}>
-              <Lock className="mr-1 h-4 w-4" /> Fechar conciliação do dia
-            </Button>
+            <>
+              <Button disabled={!allReviewed} onClick={() => doClose()}>
+                <Lock className="mr-1 h-4 w-4" /> Fechar conciliação do dia
+              </Button>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="outline">
+                    <AlertTriangle className="mr-1 h-4 w-4" /> Fechar com pendências
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Fechar com pendências?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {pendingEntries.length === 0
+                        ? "Não há lançamentos pendentes — a conciliação será fechada normalmente."
+                        : `${pendingEntries.length} lançamento(s) ficarão pendentes ` +
+                          `(${pendingBB.length} do Banco do Brasil e ${pendingAg.length} do Agrotis). ` +
+                          "Eles permanecem salvos e poderão ser tratados depois. " +
+                          "A conciliação será fechada e marcada como fechada com pendências."}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => doClose(true)}>Fechar com pendências</AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </>
           )}
           {isClosed && isDiretor && (
             <AlertDialog>
@@ -663,6 +703,145 @@ function SuggestedRow({
         )}
       </div>
     </Card>
+  );
+}
+
+function escapeHtml(s: string) {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
+}
+
+function fmtEntryAmount(e: Entry) {
+  return `${e.entry_type === "C" ? "+" : "−"} R$ ${Number(e.amount).toFixed(2)}`;
+}
+
+// Abre uma janela com um documento HTML autocontido e dispara a impressão.
+// Evita conflitos de @media print com o app e mantém o relatório previsível.
+function printPendingReport(title: string, bb: Entry[], ag: Entry[]) {
+  const w = window.open("", "_blank", "width=900,height=700");
+  if (!w) {
+    toast.error("Não foi possível abrir a janela de impressão. Permita pop-ups para este site.");
+    return;
+  }
+  const rows = (list: Entry[]) =>
+    list.length === 0
+      ? `<tr><td colspan="5" class="empty">Nenhuma pendência.</td></tr>`
+      : list
+          .map(
+            (e) => `<tr>
+      <td>${escapeHtml(e.entry_date ?? "—")}</td>
+      <td>${escapeHtml(e.description || "(sem descrição)")}</td>
+      <td>${escapeHtml(e.beneficiary ?? "")}</td>
+      <td>${escapeHtml(e.document_ref ?? "")}</td>
+      <td class="amt ${e.entry_type === "C" ? "c" : "d"}">${fmtEntryAmount(e)}</td>
+    </tr>`,
+          )
+          .join("");
+  const section = (label: string, list: Entry[]) => `
+    <h2>${escapeHtml(label)} · ${list.length}</h2>
+    <table>
+      <thead>
+        <tr><th>Data</th><th>Descrição</th><th>Beneficiário</th><th>Documento</th><th class="amt">Valor</th></tr>
+      </thead>
+      <tbody>${rows(list)}</tbody>
+    </table>`;
+  w.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #111; margin: 24px; }
+      h1 { font-size: 18px; margin: 0 0 16px; }
+      h2 { font-size: 14px; margin: 24px 0 6px; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; vertical-align: top; }
+      th { background: #f4f4f5; }
+      td.amt, th.amt { text-align: right; white-space: nowrap; }
+      td.amt.c { color: #047857; }
+      td.amt.d { color: #be123c; }
+      td.empty { color: #777; font-style: italic; }
+      @media print { body { margin: 0; } }
+    </style></head><body>
+    <h1>${escapeHtml(title)}</h1>
+    ${section("Banco do Brasil — sem par confirmado", bb)}
+    ${section("Agrotis — sem par confirmado", ag)}
+  </body></html>`);
+  w.document.close();
+  w.focus();
+  w.print();
+}
+
+function PendingEntryRow({ e }: { e: Entry }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2 border-b py-1.5 text-sm last:border-b-0">
+      <div className="min-w-0">
+        <div className="truncate font-medium">{e.description || "(sem descrição)"}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {e.entry_date ?? "sem data"}
+          {e.beneficiary ? ` · ${e.beneficiary}` : ""}
+          {e.document_ref ? ` · ${e.document_ref}` : ""}
+        </div>
+      </div>
+      <span className={`whitespace-nowrap ${e.entry_type === "C" ? "text-emerald-600" : "text-rose-600"}`}>
+        {fmtEntryAmount(e)}
+      </span>
+    </div>
+  );
+}
+
+function PendingReportDialog({ rec, pendingBB, pendingAg }: {
+  rec: any; pendingBB: Entry[]; pendingAg: Entry[];
+}) {
+  const dateLabel = format(new Date(rec.reconciliation_date + "T00:00"), "dd/MM/yyyy", { locale: ptBR });
+  const title = `Pendências a conciliar — ${dateLabel} — ${rec.account}`;
+  const total = pendingBB.length + pendingAg.length;
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button variant="outline">
+          <ClipboardList className="mr-1 h-4 w-4" /> Pendências
+          {total > 0 && (
+            <Badge variant="secondary" className="ml-1.5">{total}</Badge>
+          )}
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
+        {total === 0 ? (
+          <p className="py-4 text-sm text-muted-foreground">Nenhuma pendência — tudo com par confirmado ou justificado.</p>
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <div className="mb-1 text-xs font-semibold uppercase text-muted-foreground">
+                Banco do Brasil · {pendingBB.length}
+              </div>
+              <div className="max-h-80 overflow-auto rounded-md border p-2">
+                {pendingBB.length === 0
+                  ? <p className="p-2 text-sm text-muted-foreground">Nenhuma pendência.</p>
+                  : pendingBB.map((e) => <PendingEntryRow key={e.id} e={e} />)}
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-xs font-semibold uppercase text-muted-foreground">
+                Agrotis · {pendingAg.length}
+              </div>
+              <div className="max-h-80 overflow-auto rounded-md border p-2">
+                {pendingAg.length === 0
+                  ? <p className="p-2 text-sm text-muted-foreground">Nenhuma pendência.</p>
+                  : pendingAg.map((e) => <PendingEntryRow key={e.id} e={e} />)}
+              </div>
+            </div>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => printPendingReport(title, pendingBB, pendingAg)}>
+            <Printer className="mr-1 h-4 w-4" /> Imprimir
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
