@@ -90,8 +90,13 @@ function Page() {
         <p className="text-sm text-muted-foreground">Carregando…</p>
       ) : q.error ? (
         <Card className="border-rose-300 bg-rose-50 p-4 text-sm text-rose-800 dark:bg-rose-950/20 dark:text-rose-300">
-          Não foi possível carregar os usuários. Confirme que <code>SUPABASE_SERVICE_ROLE_KEY</code> está configurada
-          no ambiente do servidor (necessária para a Admin API do Supabase).
+          <div className="font-medium">Não foi possível carregar os usuários.</div>
+          <div className="mt-1 break-words font-mono text-xs">{(q.error as Error).message}</div>
+          <p className="mt-2 text-xs">
+            Confirme no ambiente do servidor (Vercel, environment Production) que <code>SUPABASE_URL</code>,{" "}
+            <code>SUPABASE_PUBLISHABLE_KEY</code> e <code>SUPABASE_SERVICE_ROLE_KEY</code> estão definidas
+            — sem aspas nem espaços — e refaça o deploy.
+          </p>
         </Card>
       ) : (
         <div className="space-y-2">
