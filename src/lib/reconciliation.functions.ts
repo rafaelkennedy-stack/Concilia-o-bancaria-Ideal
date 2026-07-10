@@ -36,21 +36,19 @@ const AiResult = z.object({
 });
 
 
-export const processReconciliation = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((d: unknown) => ProcessInput.parse(d))
-  .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
-    const { createAnthropicClient, RECONCILIATION_MODEL } = await import("@/lib/ai-gateway.server");
 
-    const anthropic = createAnthropicClient();
+// Extrai lançamentos e sugestões de casamento dos dois extratos via IA. Aplica
+// o rebaixamento de "strong" -> "medium" quando a similaridade de nomes é baixa.
+// Compartilhado entre a conciliação de um dia (processReconciliation) e a
+// conciliação em massa de vários dias (processMassReconciliation).
+async function extractReconciliation(bbText: string, agrotisText: string) {
+  const { createAnthropicClient, RECONCILIATION_MODEL } = await import("@/lib/ai-gateway.server");
+  const anthropic = createAnthropicClient();
 
-    const bbText = data.bbText;
-    const agrotisText = data.agrotisText;
+  const prompt = `Você é um assistente contábil especializado em conciliação bancária.
 
-    const prompt = `Você é um assistente contábil especializado em conciliação bancária.
-
-Extrai os lançamentos de dois extratos e sugere casamentos.
+Extrai os lançamentos de dois extratos e sugere casamentos. Os extratos podem
+cobrir VÁRIOS DIAS — extraia a data (entry_date) correta de CADA lançamento.
 
 EXTRATO BB (Excel convertido para CSV):
 ${bbText.slice(0, 40000)}
@@ -72,62 +70,69 @@ Retorne APENAS JSON válido no formato:
 
 Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays. entry_type = "C" para crédito, "D" para débito. amount sempre positivo.`;
 
-    const message = await anthropic.messages.create({
-      model: RECONCILIATION_MODEL,
-      max_tokens: 16000,
-      messages: [{ role: "user", content: prompt }],
-    });
-    if (message.stop_reason === "refusal") throw new Error("IA recusou a solicitação");
-    const text = message.content
-      .map((block) => (block.type === "text" ? block.text : ""))
-      .join("");
-    // extract JSON
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("IA não retornou JSON");
-    let parsed;
-    try {
-      parsed = AiResult.parse(JSON.parse(jsonMatch[0]));
-    } catch (e) {
-      throw new Error("Formato inesperado da IA: " + (e as Error).message);
+  const message = await anthropic.messages.create({
+    model: RECONCILIATION_MODEL,
+    max_tokens: 16000,
+    messages: [{ role: "user", content: prompt }],
+  });
+  if (message.stop_reason === "refusal") throw new Error("IA recusou a solicitação");
+  const text = message.content
+    .map((block) => (block.type === "text" ? block.text : ""))
+    .join("");
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("IA não retornou JSON");
+  let parsed;
+  try {
+    parsed = AiResult.parse(JSON.parse(jsonMatch[0]));
+  } catch (e) {
+    throw new Error("Formato inesperado da IA: " + (e as Error).message);
+  }
+
+  // Rebaixa "strong" -> "medium" quando a similaridade de nomes < 70%.
+  const norm = (s: string | null | undefined) =>
+    (s ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  const bigrams = (s: string) => {
+    const set = new Set<string>();
+    for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+    return set;
+  };
+  const dice = (a: string, b: string) => {
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    const A = bigrams(a), B = bigrams(b);
+    if (A.size === 0 || B.size === 0) return 0;
+    let inter = 0;
+    A.forEach((g) => { if (B.has(g)) inter++; });
+    return (2 * inter) / (A.size + B.size);
+  };
+  const nameOf = (e: z.infer<typeof AiEntry>) =>
+    norm(e.beneficiary) || norm(e.description);
+  parsed.matches = parsed.matches.map((m) => {
+    if (m.confidence !== "strong") return m;
+    const bb = parsed.bb_entries[m.bb_index];
+    const ag = parsed.agrotis_entries[m.agrotis_index];
+    if (!bb || !ag) return m;
+    const a = nameOf(bb), b = nameOf(ag);
+    if (!a || !b) return m;
+    const sim = dice(a, b);
+    if (sim < 0.7) {
+      return { ...m, confidence: "medium" as const,
+        reason: `${m.reason} (rebaixado: similaridade de nome ${(sim * 100).toFixed(0)}%)` };
     }
+    return m;
+  });
+  return parsed;
+}
 
-    // Bug fix: downgrade "strong" suggestions when name similarity < 70%.
-    // Value/date alone cannot justify a strong match — names must also align.
-    const norm = (s: string | null | undefined) =>
-      (s ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-        .replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
-    const bigrams = (s: string) => {
-      const set = new Set<string>();
-      for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
-      return set;
-    };
-    const dice = (a: string, b: string) => {
-      if (!a || !b) return 0;
-      if (a === b) return 1;
-      const A = bigrams(a), B = bigrams(b);
-      if (A.size === 0 || B.size === 0) return 0;
-      let inter = 0;
-      A.forEach((g) => { if (B.has(g)) inter++; });
-      return (2 * inter) / (A.size + B.size);
-    };
-    const nameOf = (e: z.infer<typeof AiEntry>) =>
-      norm(e.beneficiary) || norm(e.description);
-    parsed.matches = parsed.matches.map((m) => {
-      if (m.confidence !== "strong") return m;
-      const bb = parsed.bb_entries[m.bb_index];
-      const ag = parsed.agrotis_entries[m.agrotis_index];
-      if (!bb || !ag) return m;
-      const a = nameOf(bb), b = nameOf(ag);
-      if (!a || !b) return m;
-      const sim = dice(a, b);
-      if (sim < 0.7) {
-        return { ...m, confidence: "medium" as const,
-          reason: `${m.reason} (rebaixado: similaridade de nome ${(sim * 100).toFixed(0)}%)` };
-      }
-      return m;
-    });
-
-
+export const processReconciliation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => ProcessInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    // O rebaixamento de similaridade de nome já é aplicado dentro de
+    // extractReconciliation.
+    const parsed = await extractReconciliation(data.bbText, data.agrotisText);
 
     // Fetch bank account to derive account label
     const { data: acct, error: acctErr } = await supabase
@@ -586,4 +591,219 @@ export const resetDailyStatus = createServerFn({ method: "POST" })
       .delete().eq("account_id", data.accountId).eq("date", data.date);
     if (error) throw new Error(error.message);
     return { ok: true };
+  });
+
+// ---- Processamento em massa (vários dias em um único fluxo) ----
+
+const MassInput = z.object({
+  bankAccountId: z.string().uuid(),
+  bbFileName: z.string(),
+  bbText: z.string().min(1),
+  agrotisFileName: z.string(),
+  agrotisText: z.string().min(1),
+});
+
+// Processa extratos que cobrem múltiplos dias. Cria UMA conciliação com status
+// "massa" contendo todos os lançamentos e sugestões; a revisão é idêntica à
+// conciliação normal. Ao fechar (closeMassReconciliation) ela é dividida em
+// conciliações diárias.
+export const processMassReconciliation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => MassInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const parsed = await extractReconciliation(data.bbText, data.agrotisText);
+
+    const { data: acct, error: acctErr } = await supabase
+      .from("bank_accounts").select("bank, entity_name, account_number, active")
+      .eq("id", data.bankAccountId).single();
+    if (acctErr || !acct) throw new Error("Conta bancária inválida.");
+    if (!acct.active) throw new Error("Conta bancária inativa.");
+    const accountLabel = `${acct.bank} — ${acct.entity_name}${acct.account_number ? ` (${acct.account_number})` : ""}`;
+
+    // Faixa de datas dos lançamentos extraídos.
+    const allDates = [...parsed.bb_entries, ...parsed.agrotis_entries]
+      .map((e) => e.entry_date)
+      .filter((d): d is string => !!d)
+      .sort();
+    const today = new Date().toISOString().slice(0, 10);
+    const minDate = allDates[0] ?? today;
+    const maxDate = allDates[allDates.length - 1] ?? minDate;
+    const dayCount = new Set(allDates).size || 1;
+
+    // reconciliation_date = primeiro dia do período (referência da massa).
+    const { data: rec, error: recErr } = await supabase
+      .from("reconciliations")
+      .insert({
+        reconciliation_date: minDate,
+        period_end_date: maxDate,
+        created_by: userId,
+        bank_account_id: data.bankAccountId,
+        account: accountLabel,
+        bb_file_name: data.bbFileName,
+        agrotis_file_name: data.agrotisFileName,
+        status: "massa",
+      })
+      .select()
+      .single();
+    if (recErr || !rec) throw new Error(recErr?.message || "Falha ao criar conciliação em massa");
+
+    const bbInserts = parsed.bb_entries.map((e) => ({ reconciliation_id: rec.id, source: "bb" as const, ...e }));
+    const agInserts = parsed.agrotis_entries.map((e) => ({ reconciliation_id: rec.id, source: "agrotis" as const, ...e }));
+    const { data: bbRows, error: bbErr } = await supabase.from("reconciliation_entries").insert(bbInserts).select();
+    if (bbErr) throw new Error(bbErr.message);
+    const { data: agRows, error: agErr } = await supabase.from("reconciliation_entries").insert(agInserts).select();
+    if (agErr) throw new Error(agErr.message);
+
+    const matchInserts = parsed.matches
+      .filter((m) => bbRows?.[m.bb_index] && agRows?.[m.agrotis_index])
+      .map((m) => ({
+        reconciliation_id: rec.id,
+        bb_entry_id: bbRows![m.bb_index].id,
+        agrotis_entry_id: agRows![m.agrotis_index].id,
+        confidence: m.confidence,
+        status: "suggested" as const,
+        reason: m.reason,
+      }));
+    if (matchInserts.length) {
+      const { error: mErr } = await supabase.from("reconciliation_matches").insert(matchInserts);
+      if (mErr) throw new Error(mErr.message);
+    }
+
+    await supabase.from("reconciliation_audit_log").insert({
+      reconciliation_id: rec.id, user_id: userId, action: "mass_processed",
+      details: { bb: bbRows?.length, agrotis: agRows?.length, matches: matchInserts.length, min_date: minDate, max_date: maxDate, days: dayCount },
+    });
+
+    return { reconciliationId: rec.id, minDate, maxDate, dayCount };
+  });
+
+// Fecha uma conciliação "massa" dividindo-a em conciliações diárias:
+// - agrupa por dia (data do lançamento do BB; agrotis segue seu par);
+// - cada dia vira uma conciliação "fechada" com seus casamentos e lançamentos;
+// - lançamentos sem par confirmado ficam no dia e a conciliação é marcada
+//   closed_with_pending; period_end_date = data BB mais recente daquele dia;
+// - a conciliação massa original é apagada ao final.
+export const closeMassReconciliation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ reconciliationId: z.string().uuid() }).parse(d))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { data: rec, error: rErr } = await supabase.from("reconciliations")
+      .select("*").eq("id", data.reconciliationId).single();
+    if (rErr || !rec) throw new Error(rErr?.message || "Conciliação não encontrada");
+    if (rec.status !== "massa") throw new Error("Esta conciliação não é do tipo massa.");
+
+    const { data: entriesData } = await supabase.from("reconciliation_entries")
+      .select("id, source, entry_date").eq("reconciliation_id", rec.id);
+    const { data: matchesData } = await supabase.from("reconciliation_matches")
+      .select("id, bb_entry_id, agrotis_entry_id, status, group_id").eq("reconciliation_id", rec.id);
+    const entries = (entriesData ?? []) as Array<{ id: string; source: string; entry_date: string | null }>;
+    const matches = (matchesData ?? []) as Array<{ id: string; bb_entry_id: string | null; agrotis_entry_id: string | null; status: string; group_id: string | null }>;
+    if (entries.length === 0) throw new Error("Conciliação em massa sem lançamentos.");
+
+    const entryById = new Map(entries.map((e) => [e.id, e]));
+    const fallbackDay = rec.reconciliation_date as string;
+
+    // Dia representativo de cada grupo (menor data do grupo), para manter os
+    // casamentos agrupados juntos mesmo quando as datas do BB divergem.
+    const groupDay = new Map<string, string>();
+    for (const m of matches) {
+      if (!m.group_id) continue;
+      const bb = m.bb_entry_id ? entryById.get(m.bb_entry_id) : null;
+      const ag = m.agrotis_entry_id ? entryById.get(m.agrotis_entry_id) : null;
+      const d = bb?.entry_date ?? ag?.entry_date ?? fallbackDay;
+      const cur = groupDay.get(m.group_id);
+      if (!cur || d < cur) groupDay.set(m.group_id, d);
+    }
+    const dayForMatch = (m: (typeof matches)[number]) => {
+      if (m.group_id && groupDay.has(m.group_id)) return groupDay.get(m.group_id)!;
+      const bb = m.bb_entry_id ? entryById.get(m.bb_entry_id) : null;
+      const ag = m.agrotis_entry_id ? entryById.get(m.agrotis_entry_id) : null;
+      return bb?.entry_date ?? ag?.entry_date ?? fallbackDay;
+    };
+
+    // Cada lançamento herda o dia do seu casamento; sem casamento usa a própria data.
+    const entryDay = new Map<string, string>();
+    for (const m of matches) {
+      const d = dayForMatch(m);
+      if (m.bb_entry_id) entryDay.set(m.bb_entry_id, d);
+      if (m.agrotis_entry_id) entryDay.set(m.agrotis_entry_id, d);
+    }
+    for (const e of entries) {
+      if (!entryDay.has(e.id)) entryDay.set(e.id, e.entry_date ?? fallbackDay);
+    }
+
+    // Lançamentos "resolvidos" = em casamento confirmado/manual ou justificado sem par.
+    const resolvedEntryIds = new Set<string>();
+    for (const m of matches) {
+      if (m.status === "suggested") continue;
+      if (m.bb_entry_id) resolvedEntryIds.add(m.bb_entry_id);
+      if (m.agrotis_entry_id) resolvedEntryIds.add(m.agrotis_entry_id);
+    }
+
+    const days = [...new Set(entryDay.values())].sort();
+    const nowIso = new Date().toISOString();
+
+    // Cria a conciliação diária de cada dia distinto.
+    const recIdByDay = new Map<string, string>();
+    for (const day of days) {
+      const dayEntries = entries.filter((e) => entryDay.get(e.id) === day);
+      const bbDates = dayEntries
+        .filter((e) => e.source === "bb" && e.entry_date)
+        .map((e) => e.entry_date as string)
+        .sort();
+      const periodEnd = bbDates.length ? bbDates[bbDates.length - 1] : day;
+      const pending = dayEntries.some((e) => !resolvedEntryIds.has(e.id));
+      const { data: dayRec, error: insErr } = await supabase.from("reconciliations").insert({
+        reconciliation_date: day,
+        period_end_date: periodEnd,
+        account: rec.account,
+        bank_account_id: rec.bank_account_id,
+        created_by: userId,
+        status: "fechada",
+        closed_at: nowIso,
+        closed_by: userId,
+        closed_with_pending: pending,
+        bb_file_name: rec.bb_file_name,
+        agrotis_file_name: rec.agrotis_file_name,
+      }).select("id").single();
+      if (insErr || !dayRec) throw new Error(insErr?.message || "Falha ao criar conciliação diária");
+      recIdByDay.set(day, dayRec.id);
+    }
+
+    // Re-parenteia lançamentos para as conciliações diárias.
+    for (const day of days) {
+      const ids = entries.filter((e) => entryDay.get(e.id) === day).map((e) => e.id);
+      if (!ids.length) continue;
+      const { error: upErr } = await supabase.from("reconciliation_entries")
+        .update({ reconciliation_id: recIdByDay.get(day)! }).in("id", ids);
+      if (upErr) throw new Error(upErr.message);
+    }
+    // Re-parenteia casamentos (agrupados por dia do casamento).
+    const matchIdsByDay = new Map<string, string[]>();
+    for (const m of matches) {
+      const d = dayForMatch(m);
+      (matchIdsByDay.get(d) ?? matchIdsByDay.set(d, []).get(d)!).push(m.id);
+    }
+    for (const [day, ids] of matchIdsByDay) {
+      const target = recIdByDay.get(day);
+      if (!target || !ids.length) continue;
+      const { error: upErr } = await supabase.from("reconciliation_matches")
+        .update({ reconciliation_id: target }).in("id", ids);
+      if (upErr) throw new Error(upErr.message);
+    }
+
+    for (const [day, id] of recIdByDay) {
+      await supabase.from("reconciliation_audit_log").insert({
+        reconciliation_id: id, user_id: userId, action: "created_from_mass",
+        details: { source_mass_id: rec.id, day },
+      });
+    }
+
+    // Apaga a conciliação massa original (já sem lançamentos/casamentos).
+    const { error: delErr } = await supabase.from("reconciliations").delete().eq("id", rec.id);
+    if (delErr) throw new Error(delErr.message);
+
+    return { ok: true, days, count: days.length };
   });

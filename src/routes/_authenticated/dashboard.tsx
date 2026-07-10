@@ -36,8 +36,8 @@ type Color = "verde" | "vermelho" | "amarelo" | "cinza" | "azul";
 type DayCell = { date: string; color: Color; recId: string | null; diverge: boolean };
 
 type Rec = {
-  id: string; reconciliation_date: string; bank_account_id: string | null;
-  status: "aberta" | "fechada" | "reaberta";
+  id: string; reconciliation_date: string; period_end_date: string | null; bank_account_id: string | null;
+  status: "aberta" | "fechada" | "reaberta" | "massa";
   balance_bank: number | null; balance_agrotis_calculated: number | null;
   closed_at: string | null;
 };
@@ -71,7 +71,7 @@ function Dashboard() {
       const [{ data: accts, error: aErr }, { data: recs }, { data: daily }] = await Promise.all([
         supabase.from("bank_accounts").select("id, bank, entity_name, account_number").eq("active", true).order("bank"),
         supabase.from("reconciliations")
-          .select("id, reconciliation_date, bank_account_id, status, balance_bank, balance_agrotis_calculated, closed_at")
+          .select("id, reconciliation_date, period_end_date, bank_account_id, status, balance_bank, balance_agrotis_calculated, closed_at")
           .gte("reconciliation_date", from),
         supabase.from("daily_account_status").select("account_id, date, status").gte("date", from),
       ]);
@@ -120,12 +120,15 @@ function Dashboard() {
     return { date, color: "vermelho", recId: null, diverge: false }; // pendente / adiada / não feita
   }
 
-  // Prazo médio: dias entre o movimento (reconciliation_date) e o fechamento (closed_at).
+  // Prazo médio: dias entre o movimento e o fechamento (closed_at). Usa
+  // period_end_date (data do movimento mais recente) quando disponível — caso das
+  // conciliações geradas por processamento em massa — senão reconciliation_date.
   function avgLead(accountId: string | null): number | null {
     const source = (q.data?.recs ?? []).filter((r) =>
       r.status === "fechada" && r.closed_at && (accountId == null || r.bank_account_id === accountId));
     if (!source.length) return null;
-    const total = source.reduce((s, r) => s + Math.max(0, diffDays(r.closed_at!.slice(0, 10), r.reconciliation_date)), 0);
+    const total = source.reduce((s, r) =>
+      s + Math.max(0, diffDays(r.closed_at!.slice(0, 10), r.period_end_date ?? r.reconciliation_date)), 0);
     return total / source.length;
   }
 

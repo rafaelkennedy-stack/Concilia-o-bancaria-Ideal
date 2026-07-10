@@ -5,7 +5,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { Plus, FileText, Settings, ListChecks, LayoutDashboard, Users } from "lucide-react";
+import { Plus, FileText, Settings, ListChecks, LayoutDashboard, Users, Layers } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 
@@ -15,12 +15,12 @@ export const Route = createFileRoute("/_authenticated/conciliacao/")({
 
 type Row = {
   id: string; reconciliation_date: string; account: string;
-  status: "aberta" | "fechada" | "reaberta";
+  status: "aberta" | "fechada" | "reaberta" | "massa";
   confirmed: number; pending: number;
 };
 
 function statusColor(s: Row["status"]) {
-  return s === "fechada" ? "default" : s === "reaberta" ? "secondary" : "outline";
+  return s === "fechada" ? "default" : s === "reaberta" || s === "massa" ? "secondary" : "outline";
 }
 
 function List() {
@@ -103,6 +103,9 @@ function List() {
           )}
           <Button asChild variant="outline">
             <Link to="/conciliacao/fila"><ListChecks className="mr-1 h-4 w-4" /> Fila do dia</Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link to="/conciliacao/massa"><Layers className="mr-1 h-4 w-4" /> Processar em massa</Link>
           </Button>
           <Button asChild>
             <Link to="/conciliacao/nova"><Plus className="mr-1 h-4 w-4" /> Nova Conciliação</Link>

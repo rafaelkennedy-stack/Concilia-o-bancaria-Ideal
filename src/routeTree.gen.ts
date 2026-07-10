@@ -18,6 +18,7 @@ import { Route as AuthenticatedConciliacaoIndexRouteImport } from './routes/_aut
 import { Route as AuthenticatedConfiguracoesUsuariosRouteImport } from './routes/_authenticated/configuracoes.usuarios'
 import { Route as AuthenticatedConfiguracoesContasRouteImport } from './routes/_authenticated/configuracoes.contas'
 import { Route as AuthenticatedConciliacaoNovaRouteImport } from './routes/_authenticated/conciliacao.nova'
+import { Route as AuthenticatedConciliacaoMassaRouteImport } from './routes/_authenticated/conciliacao.massa'
 import { Route as AuthenticatedConciliacaoFilaRouteImport } from './routes/_authenticated/conciliacao.fila'
 import { Route as AuthenticatedConciliacaoIdRouteImport } from './routes/_authenticated/conciliacao.$id'
 import { Route as AuthenticatedConciliacaoIdVinculosRouteImport } from './routes/_authenticated/conciliacao.$id_.vinculos'
@@ -71,6 +72,12 @@ const AuthenticatedConciliacaoNovaRoute =
     path: '/nova',
     getParentRoute: () => AuthenticatedConciliacaoRoute,
   } as any)
+const AuthenticatedConciliacaoMassaRoute =
+  AuthenticatedConciliacaoMassaRouteImport.update({
+    id: '/massa',
+    path: '/massa',
+    getParentRoute: () => AuthenticatedConciliacaoRoute,
+  } as any)
 const AuthenticatedConciliacaoFilaRoute =
   AuthenticatedConciliacaoFilaRouteImport.update({
     id: '/fila',
@@ -97,6 +104,7 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/conciliacao/$id': typeof AuthenticatedConciliacaoIdRoute
   '/conciliacao/fila': typeof AuthenticatedConciliacaoFilaRoute
+  '/conciliacao/massa': typeof AuthenticatedConciliacaoMassaRoute
   '/conciliacao/nova': typeof AuthenticatedConciliacaoNovaRoute
   '/configuracoes/contas': typeof AuthenticatedConfiguracoesContasRoute
   '/configuracoes/usuarios': typeof AuthenticatedConfiguracoesUsuariosRoute
@@ -109,6 +117,7 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/conciliacao/$id': typeof AuthenticatedConciliacaoIdRoute
   '/conciliacao/fila': typeof AuthenticatedConciliacaoFilaRoute
+  '/conciliacao/massa': typeof AuthenticatedConciliacaoMassaRoute
   '/conciliacao/nova': typeof AuthenticatedConciliacaoNovaRoute
   '/configuracoes/contas': typeof AuthenticatedConfiguracoesContasRoute
   '/configuracoes/usuarios': typeof AuthenticatedConfiguracoesUsuariosRoute
@@ -124,6 +133,7 @@ export interface FileRoutesById {
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
   '/_authenticated/conciliacao/$id': typeof AuthenticatedConciliacaoIdRoute
   '/_authenticated/conciliacao/fila': typeof AuthenticatedConciliacaoFilaRoute
+  '/_authenticated/conciliacao/massa': typeof AuthenticatedConciliacaoMassaRoute
   '/_authenticated/conciliacao/nova': typeof AuthenticatedConciliacaoNovaRoute
   '/_authenticated/configuracoes/contas': typeof AuthenticatedConfiguracoesContasRoute
   '/_authenticated/configuracoes/usuarios': typeof AuthenticatedConfiguracoesUsuariosRoute
@@ -139,6 +149,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/conciliacao/$id'
     | '/conciliacao/fila'
+    | '/conciliacao/massa'
     | '/conciliacao/nova'
     | '/configuracoes/contas'
     | '/configuracoes/usuarios'
@@ -151,6 +162,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/conciliacao/$id'
     | '/conciliacao/fila'
+    | '/conciliacao/massa'
     | '/conciliacao/nova'
     | '/configuracoes/contas'
     | '/configuracoes/usuarios'
@@ -165,6 +177,7 @@ export interface FileRouteTypes {
     | '/_authenticated/dashboard'
     | '/_authenticated/conciliacao/$id'
     | '/_authenticated/conciliacao/fila'
+    | '/_authenticated/conciliacao/massa'
     | '/_authenticated/conciliacao/nova'
     | '/_authenticated/configuracoes/contas'
     | '/_authenticated/configuracoes/usuarios'
@@ -243,6 +256,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedConciliacaoNovaRouteImport
       parentRoute: typeof AuthenticatedConciliacaoRoute
     }
+    '/_authenticated/conciliacao/massa': {
+      id: '/_authenticated/conciliacao/massa'
+      path: '/massa'
+      fullPath: '/conciliacao/massa'
+      preLoaderRoute: typeof AuthenticatedConciliacaoMassaRouteImport
+      parentRoute: typeof AuthenticatedConciliacaoRoute
+    }
     '/_authenticated/conciliacao/fila': {
       id: '/_authenticated/conciliacao/fila'
       path: '/fila'
@@ -270,6 +290,7 @@ declare module '@tanstack/react-router' {
 interface AuthenticatedConciliacaoRouteChildren {
   AuthenticatedConciliacaoIdRoute: typeof AuthenticatedConciliacaoIdRoute
   AuthenticatedConciliacaoFilaRoute: typeof AuthenticatedConciliacaoFilaRoute
+  AuthenticatedConciliacaoMassaRoute: typeof AuthenticatedConciliacaoMassaRoute
   AuthenticatedConciliacaoNovaRoute: typeof AuthenticatedConciliacaoNovaRoute
   AuthenticatedConciliacaoIndexRoute: typeof AuthenticatedConciliacaoIndexRoute
   AuthenticatedConciliacaoIdVinculosRoute: typeof AuthenticatedConciliacaoIdVinculosRoute
@@ -279,6 +300,7 @@ const AuthenticatedConciliacaoRouteChildren: AuthenticatedConciliacaoRouteChildr
   {
     AuthenticatedConciliacaoIdRoute: AuthenticatedConciliacaoIdRoute,
     AuthenticatedConciliacaoFilaRoute: AuthenticatedConciliacaoFilaRoute,
+    AuthenticatedConciliacaoMassaRoute: AuthenticatedConciliacaoMassaRoute,
     AuthenticatedConciliacaoNovaRoute: AuthenticatedConciliacaoNovaRoute,
     AuthenticatedConciliacaoIndexRoute: AuthenticatedConciliacaoIndexRoute,
     AuthenticatedConciliacaoIdVinculosRoute:

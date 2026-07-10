@@ -15,14 +15,14 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { ArrowLeft, Check, Search, Lock, Unlock, X, AlertTriangle, Network, ClipboardList, Printer } from "lucide-react";
+import { ArrowLeft, Check, Search, Lock, Unlock, X, AlertTriangle, Network, ClipboardList, Printer, Layers } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useState } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   confirmMatch, manualMatch, justifyNoPair, closeReconciliation, reopenReconciliation,
-  reassignMatch, rejectSuggestion, confirmGroupedMatch,
+  reassignMatch, rejectSuggestion, confirmGroupedMatch, closeMassReconciliation,
 } from "@/lib/reconciliation.functions";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/$id")({
@@ -55,6 +55,7 @@ function Detail() {
   const { isDiretor } = useAuth();
   const confirmFn = useServerFn(confirmMatch);
   const closeFn = useServerFn(closeReconciliation);
+  const closeMassFn = useServerFn(closeMassReconciliation);
   const reopenFn = useServerFn(reopenReconciliation);
   const noPairFn = useServerFn(justifyNoPair);
   const manualFn = useServerFn(manualMatch);
@@ -120,6 +121,10 @@ function Detail() {
 
   const allReviewed = strong.length === 0 && medium.length === 0 && unmatched.length === 0;
   const isClosed = rec.status === "fechada";
+  // Conciliação em massa (vários dias). Ao fechar, é dividida em conciliações
+  // diárias; por isso o card de saldo do dia e o fechamento normal não se aplicam.
+  const isMassa = rec.status === "massa";
+  const distinctDays = new Set(entries.map((e) => e.entry_date ?? rec.reconciliation_date));
 
   // Lançamentos sem par confirmado: os que não participam de nenhum casamento
   // definitivo (confirmed/manual) nem foram justificados como sem par (no_pair)
@@ -155,6 +160,16 @@ function Detail() {
       toast.error("Não foi possível fechar", { description: msg.split("|PREV:")[0] });
     }
   }
+  async function doCloseMass() {
+    try {
+      const res = await closeMassFn({ data: { reconciliationId: id } });
+      toast.success(`Dividido em ${res.count} conciliação(ões) diária(s).`);
+      // A conciliação massa foi apagada; volta para a lista.
+      navigate({ to: "/conciliacao" });
+    } catch (e) {
+      toast.error("Não foi possível fechar", { description: (e as Error).message });
+    }
+  }
   async function doReopen() {
     try { await reopenFn({ data: { reconciliationId: id } }); toast.success("Conciliação reaberta."); qc.invalidateQueries({ queryKey: ["reconciliation", id] }); }
     catch (e) { toast.error((e as Error).message); }
@@ -177,16 +192,26 @@ function Detail() {
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">
-            {format(new Date(rec.reconciliation_date + "T00:00"), "dd 'de' MMMM 'de' yyyy", { locale: ptBR })}
+            {isMassa
+              ? "Processamento em massa"
+              : format(new Date(rec.reconciliation_date + "T00:00"), "dd 'de' MMMM 'de' yyyy", { locale: ptBR })}
           </h1>
-          <div className="text-sm text-muted-foreground">{rec.account}</div>
+          <div className="text-sm text-muted-foreground">
+            {rec.account}
+            {isMassa && (
+              <> · {format(new Date(rec.reconciliation_date + "T00:00"), "dd/MM/yyyy", { locale: ptBR })}
+                {rec.period_end_date
+                  ? ` a ${format(new Date(rec.period_end_date + "T00:00"), "dd/MM/yyyy", { locale: ptBR })}`
+                  : ""} · {distinctDays.size} dia(s)</>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Button asChild variant="outline">
             <Link to="/conciliacao/$id/vinculos" params={{ id }}><Network className="mr-1 h-4 w-4" /> Ver vínculos</Link>
           </Button>
           <PendingReportDialog rec={rec} pendingBB={pendingBB} pendingAg={pendingAg} />
-          <Badge className="capitalize" variant={isClosed ? "default" : rec.status === "reaberta" ? "secondary" : "outline"}>
+          <Badge className="capitalize" variant={isClosed ? "default" : rec.status === "reaberta" || isMassa ? "secondary" : "outline"}>
             {rec.status}
           </Badge>
           {isClosed && rec.closed_with_pending && (
@@ -194,7 +219,29 @@ function Detail() {
               com pendências
             </Badge>
           )}
-          {!isClosed && (
+          {isMassa && (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button><Layers className="mr-1 h-4 w-4" /> Fechar e dividir por dia</Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Fechar e dividir por dia?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Serão criadas {distinctDays.size} conciliação(ões) diária(s), uma para cada dia distinto.
+                    Os casamentos confirmados vão para o dia do lançamento do BB e os lançamentos sem par
+                    confirmado ficam pendentes na conciliação do respectivo dia. Esta conciliação em massa
+                    será removida.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                  <AlertDialogAction onClick={doCloseMass}>Fechar e dividir</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
+          {!isClosed && !isMassa && (
             <>
               <Button disabled={!allReviewed} onClick={() => doClose()}>
                 <Lock className="mr-1 h-4 w-4" /> Fechar conciliação do dia
@@ -245,7 +292,23 @@ function Detail() {
         </div>
       </div>
 
-      <BalanceCard rec={rec} entries={entries} />
+      {isMassa ? (
+        <Card className="mb-4 border-blue-300 bg-blue-50 p-4 dark:bg-blue-950/20">
+          <div className="flex items-start gap-2">
+            <Layers className="mt-0.5 h-5 w-5 text-blue-600" />
+            <div className="text-sm text-blue-900 dark:text-blue-200">
+              <div className="font-medium">Conciliação em massa</div>
+              <p className="mt-1 text-blue-800 dark:text-blue-300">
+                Revise e confirme os casamentos normalmente. Ao clicar em “Fechar e dividir por dia”,
+                o sistema cria uma conciliação fechada para cada dia distinto, distribuindo os casamentos
+                pela data do lançamento do BB. A conferência de saldo é feita em cada conciliação diária.
+              </p>
+            </div>
+          </div>
+        </Card>
+      ) : (
+        <BalanceCard rec={rec} entries={entries} />
+      )}
 
       {closeError && (
         <Card className="mb-4 border-rose-300 bg-rose-50 p-4 dark:bg-rose-950/20">

@@ -274,6 +274,7 @@ export type Database = {
           created_at: string
           created_by: string
           id: string
+          period_end_date: string | null
           reconciliation_date: string
           reopened_at: string | null
           reopened_by: string | null
@@ -294,6 +295,7 @@ export type Database = {
           created_at?: string
           created_by: string
           id?: string
+          period_end_date?: string | null
           reconciliation_date?: string
           reopened_at?: string | null
           reopened_by?: string | null
@@ -314,6 +316,7 @@ export type Database = {
           created_at?: string
           created_by?: string
           id?: string
+          period_end_date?: string | null
           reconciliation_date?: string
           reopened_at?: string | null
           reopened_by?: string | null
@@ -371,7 +374,7 @@ export type Database = {
       entry_type: "C" | "D"
       match_confidence: "strong" | "medium" | "pending"
       match_status: "suggested" | "confirmed" | "manual" | "no_pair"
-      reconciliation_status: "aberta" | "fechada" | "reaberta"
+      reconciliation_status: "aberta" | "fechada" | "reaberta" | "massa"
     }
     CompositeTypes: {
       [_ in never]: never
