@@ -66,59 +66,136 @@ function bbBeneficiary(det: string): string {
     .trim();
 }
 
-// Extração ESTRUTURADA do Excel do BB. A coluna "Inf." define C/D e "Valor R$"
-// o valor — lidos diretamente, sem IA. Localiza a linha de cabeçalho por nome de
-// coluna, então adapta-se à ordem/posição das colunas.
+const normHeader = (s: unknown) => String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+
+// Coage uma célula de data (string formatada ou Date de cellDates) para ISO.
+function coerceISO(fmtCell: unknown, rawCell: unknown): string | null {
+  if (rawCell instanceof Date && !Number.isNaN(rawCell.getTime())) return rawCell.toISOString().slice(0, 10);
+  const s = String(fmtCell ?? "").trim();
+  let m = s.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  m = s.match(/(\d{2})\/(\d{2})\/(\d{2})\b/);         // ano com 2 dígitos
+  if (m) return `20${m[3]}-${m[2]}-${m[1]}`;
+  m = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  return null;
+}
+
+// Valor com sinal: usa o número cru (Sicredi guarda valor numérico com sinal);
+// se vier string, detecta negativo por "-" ou parênteses e usa o valor absoluto.
+function coerceSignedValue(fmtCell: unknown, rawCell: unknown): number | null {
+  if (typeof rawCell === "number" && Number.isFinite(rawCell)) return rawCell;
+  const s = String(fmtCell ?? "");
+  const abs = Math.abs(parseBRNumber(s) ?? NaN);
+  if (!Number.isFinite(abs)) return null;
+  const negative = /-/.test(s) || /^\s*\(/.test(s);
+  return negative ? -abs : abs;
+}
+
+// Extração ESTRUTURADA de extrato bancário em Excel (.xlsx OU .xls antigo —
+// SheetJS lê ambos). Detecta o banco pelo cabeçalho e delega:
+//   - coluna "Inf." (C/D)  => Banco do Brasil (tipo lido da coluna)
+//   - "Valor (R$)" sem C/D  => Sicredi (tipo pelo SINAL do valor)
 export async function parseBbEntries(file: File): Promise<ParsedEntry[]> {
   const XLSX = await import("xlsx");
-  const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
   const out: ParsedEntry[] = [];
-  const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 
   for (const sheetName of wb.SheetNames) {
-    const rows = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[sheetName], { header: 1, raw: false, defval: "" });
-    // Cabeçalho: linha com "Data", "Valor…", "Inf." e "Historico".
+    const ws = wb.Sheets[sheetName];
+    const fmt = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, raw: false, defval: "" });
+    // Cabeçalho = primeira linha com "Data" e uma coluna "Valor…".
     let headerIdx = -1;
     const col: Record<string, number> = {};
-    for (let i = 0; i < rows.length; i++) {
-      const cells = rows[i].map(norm);
-      if (cells.includes("data") && cells.some((c) => c.startsWith("valor")) && cells.includes("inf.")) {
+    for (let i = 0; i < fmt.length; i++) {
+      const cells = fmt[i].map(normHeader);
+      if (cells.includes("data") && cells.some((c) => c.startsWith("valor"))) {
         headerIdx = i;
-        rows[i].forEach((c, j) => { col[norm(c)] = j; });
+        fmt[i].forEach((c, j) => { col[normHeader(c)] = j; });
         break;
       }
     }
     if (headerIdx < 0) continue;
-    const cData = col["data"];
-    const cInf = col["inf."];
-    const cHist = col["historico"] ?? col["histórico"];
-    const cValKey = Object.keys(col).find((k) => k.startsWith("valor"));
-    const cVal = cValKey != null ? col[cValKey] : -1;
-    const cDetKey = Object.keys(col).find((k) => k.startsWith("detalhamento"));
-    const cDet = cDetKey != null ? col[cDetKey] : -1;
-    const cDoc = col["numero documento"] ?? col["número documento"] ?? -1;
 
-    for (let i = headerIdx + 1; i < rows.length; i++) {
-      const r = rows[i];
-      const entry_date = brDateToISO(String(r[cData] ?? ""));
-      if (!entry_date) continue;
-      const hist = String(r[cHist] ?? "").trim();
-      if (/saldo anterior/i.test(hist)) continue;
-      const amount = parseBRNumber(String(r[cVal] ?? ""));
-      if (amount == null) continue;
-      const inf = norm(r[cInf]).toUpperCase();
-      const entry_type: "C" | "D" = inf.startsWith("D") ? "D" : "C";
-      const det = cDet >= 0 ? String(r[cDet] ?? "") : "";
-      const beneficiary = bbBeneficiary(det) || null;
-      out.push({
-        entry_date,
-        description: hist,
-        beneficiary,
-        amount: Math.abs(amount),
-        entry_type,
-        document_ref: cDoc >= 0 ? String(r[cDoc] ?? "").trim() || null : null,
-      });
+    const hasInf = Object.keys(col).some((k) => k.startsWith("inf"));
+    if (hasInf) {
+      out.push(...parseBbSheet(fmt, headerIdx, col));
+    } else {
+      const raw = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, raw: true, defval: null });
+      out.push(...parseSicrediSheet(fmt, raw, headerIdx, col));
     }
+  }
+  return out;
+}
+
+// Banco do Brasil: tipo vem da coluna "Inf." (C/D); valor de "Valor R$"; nome do
+// "Detalhamento Hist.".
+function parseBbSheet(fmt: unknown[][], headerIdx: number, col: Record<string, number>): ParsedEntry[] {
+  const out: ParsedEntry[] = [];
+  const cData = col["data"];
+  const cInf = Object.keys(col).find((k) => k.startsWith("inf"));
+  const cInfIdx = cInf != null ? col[cInf] : -1;
+  const cHist = col["historico"] ?? col["histórico"] ?? -1;
+  const cValKey = Object.keys(col).find((k) => k.startsWith("valor"));
+  const cVal = cValKey != null ? col[cValKey] : -1;
+  const cDetKey = Object.keys(col).find((k) => k.startsWith("detalhamento"));
+  const cDet = cDetKey != null ? col[cDetKey] : -1;
+  const cDoc = col["numero documento"] ?? col["número documento"] ?? -1;
+
+  for (let i = headerIdx + 1; i < fmt.length; i++) {
+    const r = fmt[i];
+    const entry_date = brDateToISO(String(r[cData] ?? ""));
+    if (!entry_date) continue;
+    const hist = cHist >= 0 ? String(r[cHist] ?? "").trim() : "";
+    if (/saldo anterior/i.test(hist)) continue;
+    const amount = parseBRNumber(String(r[cVal] ?? ""));
+    if (amount == null) continue;
+    const inf = normHeader(r[cInfIdx]).toUpperCase();
+    const entry_type: "C" | "D" = inf.startsWith("D") ? "D" : "C";
+    const det = cDet >= 0 ? String(r[cDet] ?? "") : "";
+    out.push({
+      entry_date,
+      description: hist,
+      beneficiary: bbBeneficiary(det) || null,
+      amount: Math.abs(amount),
+      entry_type,
+      document_ref: cDoc >= 0 ? String(r[cDoc] ?? "").trim() || null : null,
+    });
+  }
+  return out;
+}
+
+// Sicredi (.xls antigo): sem coluna C/D. O tipo é o SINAL do valor — positivo =
+// crédito/entrada (C), negativo = débito/saída (D); amount = |valor|. Ignora a
+// linha "Saldo Anterior" e linhas sem data.
+function parseSicrediSheet(
+  fmt: unknown[][], raw: unknown[][], headerIdx: number, col: Record<string, number>,
+): ParsedEntry[] {
+  const out: ParsedEntry[] = [];
+  const cData = col["data"];
+  const cValKey = Object.keys(col).find((k) => k.startsWith("valor"));
+  const cVal = cValKey != null ? col[cValKey] : -1;
+  const cDescKey = Object.keys(col).find((k) => k.startsWith("descri"));
+  const cDesc = cDescKey != null ? col[cDescKey] : -1;
+  const cDoc = Object.keys(col).find((k) => k.startsWith("documento")) != null
+    ? col[Object.keys(col).find((k) => k.startsWith("documento"))!] : -1;
+
+  for (let i = headerIdx + 1; i < fmt.length; i++) {
+    const rf = fmt[i], rr = raw[i] ?? [];
+    const entry_date = coerceISO(rf[cData], rr[cData]);
+    if (!entry_date) continue;
+    const desc = cDesc >= 0 ? String(rf[cDesc] ?? "").trim() : "";
+    if (/saldo\s*anterior/i.test(desc)) continue;
+    const signed = cVal >= 0 ? coerceSignedValue(rf[cVal], rr[cVal]) : null;
+    if (signed == null) continue;
+    out.push({
+      entry_date,
+      description: desc,
+      beneficiary: null,
+      amount: Math.abs(signed),
+      entry_type: signed < 0 ? "D" : "C",
+      document_ref: cDoc >= 0 ? String(rf[cDoc] ?? "").trim() || null : null,
+    });
   }
   return out;
 }

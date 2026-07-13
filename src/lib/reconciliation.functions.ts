@@ -588,28 +588,9 @@ export const closeReconciliation = createServerFn({ method: "POST" })
     // Compute Agrotis calculated balance
     const calculated = await computeAgrotisCalculated(supabase, rec.id, rec.balance_agrotis_previous);
 
-    // Validate chain: previous closed reconciliation for this bank account
-    if (rec.bank_account_id && rec.balance_agrotis_previous != null) {
-      const { data: prev } = await supabase.from("reconciliations")
-        .select("id, reconciliation_date, balance_bank, balance_agrotis_calculated, status")
-        .eq("bank_account_id", rec.bank_account_id)
-        .in("status", ["fechada", "reaberta"])
-        .lt("reconciliation_date", rec.reconciliation_date)
-        .order("reconciliation_date", { ascending: false })
-        .limit(1);
-      const previous = prev?.[0];
-      if (previous) {
-        const prevClose = previous.balance_agrotis_calculated ?? previous.balance_bank;
-        if (prevClose != null && Math.abs(Number(prevClose) - Number(rec.balance_agrotis_previous)) > 0.01) {
-          throw new Error(
-            `Saldo anterior Agrotis (R$ ${Number(rec.balance_agrotis_previous).toFixed(2)}) ` +
-            `não bate com fechamento do dia anterior (R$ ${Number(prevClose).toFixed(2)}). ` +
-            `Reabra a conciliação de ${previous.reconciliation_date} para corrigir.` +
-            `|PREV:${previous.id}`
-          );
-        }
-      }
-    }
+    // A validação de cadeia de saldo (bloqueio quando o saldo anterior não batia
+    // com o fechamento do dia anterior) foi removida: o fechamento é sempre
+    // permitido, com ou sem pendências.
 
     const closedWithPending = data.closedWithPending ?? false;
     const { error } = await supabase.from("reconciliations")
@@ -945,7 +926,20 @@ export const closeMassReconciliation = createServerFn({ method: "POST" })
     const days = [...new Set(entryDay.values())].sort();
     const nowIso = new Date().toISOString();
 
-    // Cria a conciliação diária de cada dia distinto.
+    // Evita duplicar: mapeia dias que JÁ possuem uma conciliação para esta conta.
+    // (Bug 5a) Um dia já existente é reaproveitado como destino em vez de criar
+    // uma segunda conciliação para a mesma conta+data.
+    const existingByDay = new Map<string, string>();
+    if (rec.bank_account_id) {
+      const { data: existing } = await supabase.from("reconciliations")
+        .select("id, reconciliation_date")
+        .eq("bank_account_id", rec.bank_account_id)
+        .in("reconciliation_date", days)
+        .neq("id", rec.id);
+      for (const e of existing ?? []) existingByDay.set(e.reconciliation_date as string, e.id as string);
+    }
+
+    // Cria (ou reaproveita) a conciliação diária de cada dia distinto.
     const recIdByDay = new Map<string, string>();
     for (const day of days) {
       const dayEntries = entries.filter((e) => entryDay.get(e.id) === day);
@@ -955,6 +949,20 @@ export const closeMassReconciliation = createServerFn({ method: "POST" })
         .sort();
       const periodEnd = bbDates.length ? bbDates[bbDates.length - 1] : day;
       const pending = dayEntries.some((e) => !resolvedEntryIds.has(e.id));
+
+      const existingId = existingByDay.get(day);
+      if (existingId) {
+        // Reaproveita a conciliação existente daquele dia (não cria duplicata).
+        await supabase.from("reconciliations").update({
+          status: "fechada",
+          closed_at: nowIso,
+          closed_by: userId,
+          closed_with_pending: pending,
+        }).eq("id", existingId);
+        recIdByDay.set(day, existingId);
+        continue;
+      }
+
       const { data: dayRec, error: insErr } = await supabase.from("reconciliations").insert({
         reconciliation_date: day,
         period_end_date: periodEnd,
