@@ -71,6 +71,9 @@ function Detail() {
 
   const [prevIdToReopen, setPrevIdToReopen] = useState<string | null>(null);
   const [closeError, setCloseError] = useState<string | null>(null);
+  // Casamentos manuais propostos (cliente): pares {bbId, agId} ainda não
+  // persistidos, exibidos no topo até o usuário clicar em Confirmar.
+  const [proposedManual, setProposedManual] = useState<Array<{ bbId: string; agId: string }>>([]);
 
   const q = useQuery({
     queryKey: ["reconciliation", id],
@@ -109,11 +112,25 @@ function Detail() {
     if (m.agrotis_entry_id) confirmedEntryIds.add(m.agrotis_entry_id);
   });
   const unmatched = entries.filter((e) => !matchedEntryIds.has(e.id));
+
+  // Propostas de casamento manual ainda válidas: ambos os lançamentos existem e
+  // continuam sem vínculo persistido. Os lançamentos consumidos por uma proposta
+  // saem da lista de pendentes e das opções dos demais seletores.
+  const validProposals = proposedManual.filter((p) =>
+    byId.has(p.bbId) && byId.has(p.agId) && !matchedEntryIds.has(p.bbId) && !matchedEntryIds.has(p.agId));
+  const proposedConsumed = new Set<string>();
+  validProposals.forEach((p) => { proposedConsumed.add(p.bbId); proposedConsumed.add(p.agId); });
+  const unmatchedVisible = unmatched.filter((e) => !proposedConsumed.has(e.id));
+  // Conjunto de lançamentos indisponíveis para seleção (com vínculo ativo OU já
+  // em uma proposta manual pendente).
+  const linkedOrProposed = new Set<string>([...matchedEntryIds, ...proposedConsumed]);
+
   // Elegíveis para casamento agrupado: TODOS os lançamentos ainda não confirmados
   // definitivamente (status ≠ confirmed/manual/no_pair) — inclui os que estão só
   // em sugestões, para o usuário escolher livremente. Selecionar um lançamento
   // sugerido remove a sugestão ao confirmar o grupo (ver confirmGroupedMatch).
-  const groupEligible = entries.filter((e) => !confirmedEntryIds.has(e.id));
+  // Exclui também lançamentos presos a uma proposta manual pendente.
+  const groupEligible = entries.filter((e) => !confirmedEntryIds.has(e.id) && !proposedConsumed.has(e.id));
   const suggestedEntryIds = new Set<string>();
   matches.forEach((m) => {
     if (m.status !== "suggested") return;
@@ -317,15 +334,33 @@ function Detail() {
 
       <Tabs defaultValue="revisar">
         <TabsList>
-          <TabsTrigger value="revisar">Revisão ({strong.length + medium.length + unmatched.length})</TabsTrigger>
+          <TabsTrigger value="revisar">Revisão ({strong.length + medium.length + unmatchedVisible.length + validProposals.length})</TabsTrigger>
           <TabsTrigger value="concluidos">Concluídos ({done.length})</TabsTrigger>
           <TabsTrigger value="historico">Histórico</TabsTrigger>
         </TabsList>
 
         <TabsContent value="revisar" className="space-y-6 pt-4">
+          {validProposals.length > 0 && (
+            <Section title="Casados manualmente — pendente confirmação" tone="strong" count={validProposals.length}>
+              {validProposals.map((p) => (
+                <ProposedManualRow key={`${p.bbId}-${p.agId}`} bb={byId.get(p.bbId)!} ag={byId.get(p.agId)!}
+                  disabled={isClosed}
+                  onConfirm={async () => {
+                    try {
+                      await manualFn({ data: { reconciliationId: id, bbEntryId: p.bbId, agrotisEntryId: p.agId } });
+                      toast.success("Casado manualmente");
+                      setProposedManual((prev) => prev.filter((x) => !(x.bbId === p.bbId && x.agId === p.agId)));
+                      qc.invalidateQueries({ queryKey: ["reconciliation", id] });
+                    } catch (err) { toast.error((err as Error).message); }
+                  }}
+                  onCancel={() => setProposedManual((prev) => prev.filter((x) => !(x.bbId === p.bbId && x.agId === p.agId)))}
+                />
+              ))}
+            </Section>
+          )}
           <Section title="Sugestões fortes" tone="strong" count={strong.length}>
             {strong.map((m) => (
-              <SuggestedRow key={m.id} m={m} entries={entries} matchedEntryIds={matchedEntryIds}
+              <SuggestedRow key={m.id} m={m} entries={entries} matchedEntryIds={linkedOrProposed}
                 disabled={isClosed} onConfirm={() => doConfirm(m.id)}
                 onConfirmReassign={async (bbId, agId) => {
                   try { await reassignConfirmFn({ data: { matchId: m.id, bbEntryId: bbId, agrotisEntryId: agId } });
@@ -342,7 +377,7 @@ function Detail() {
           </Section>
           <Section title="Sugestões médias" tone="medium" count={medium.length}>
             {medium.map((m) => (
-              <SuggestedRow key={m.id} m={m} entries={entries} matchedEntryIds={matchedEntryIds}
+              <SuggestedRow key={m.id} m={m} entries={entries} matchedEntryIds={linkedOrProposed}
                 disabled={isClosed} onConfirm={() => doConfirm(m.id)}
                 onConfirmReassign={async (bbId, agId) => {
                   try { await reassignConfirmFn({ data: { matchId: m.id, bbEntryId: bbId, agrotisEntryId: agId } });
@@ -370,15 +405,17 @@ function Detail() {
               }}
             />
           )}
-          <Section title="Pendentes (sem par)" tone="pending" count={unmatched.length}>
-            {unmatched.map((e) => (
-              <PendingRow key={e.id} entry={e} allEntries={entries}
-                onManual={async (otherId) => {
-                  const bb = e.source === "bb" ? e.id : otherId;
-                  const ag = e.source === "agrotis" ? e.id : otherId;
-                  try { await manualFn({ data: { reconciliationId: id, bbEntryId: bb, agrotisEntryId: ag } });
-                    toast.success("Casado manualmente"); qc.invalidateQueries({ queryKey: ["reconciliation", id] }); }
-                  catch (err) { toast.error((err as Error).message); }
+          <Section title="Pendentes (sem par)" tone="pending" count={unmatchedVisible.length}>
+            {unmatchedVisible.map((e) => (
+              <PendingRow key={e.id} entry={e} allEntries={entries} excludeIds={linkedOrProposed}
+                onPropose={(otherId) => {
+                  const bbId = e.source === "bb" ? e.id : otherId;
+                  const agId = e.source === "agrotis" ? e.id : otherId;
+                  // Apenas propõe (cliente); a confirmação persiste via manualMatch.
+                  setProposedManual((prev) =>
+                    prev.some((x) => x.bbId === bbId && x.agId === agId)
+                      ? prev
+                      : [...prev, { bbId, agId }]);
                 }}
                 onNoPair={async (justification) => {
                   try { await noPairFn({ data: { reconciliationId: id, entryId: e.id, source: e.source, justification } });
@@ -476,25 +513,63 @@ function MatchRow({ m, bb, ag, actions, tone }: { m: Match; bb?: Entry; ag?: Ent
   );
 }
 
-function PendingRow({ entry, allEntries, onManual, onNoPair, disabled }: {
-  entry: Entry; allEntries: Entry[];
-  onManual: (otherId: string) => void; onNoPair: (j: string) => void; disabled: boolean;
+// Casamento manual proposto na tela (ainda não persistido). O botão "Confirmar"
+// é que efetiva (via manualMatch); "Cancelar" descarta a proposta.
+function ProposedManualRow({ bb, ag, onConfirm, onCancel, disabled }: {
+  bb: Entry; ag: Entry; onConfirm: () => void; onCancel: () => void; disabled: boolean;
+}) {
+  const diff = Number((signedAmount(bb) - signedAmount(ag)).toFixed(2));
+  const overTolerance = Math.abs(diff) > TOLERANCE;
+  return (
+    <Card className="p-3">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <EntryCard e={bb} label="Banco do Brasil" />
+        <EntryCard e={ag} label="Agrotis" />
+      </div>
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span className="font-medium text-amber-700 dark:text-amber-400">
+          Casado manualmente — pendente confirmação
+          {overTolerance && (
+            <span className="ml-2 text-rose-600">
+              Diferença R$ {Math.abs(diff).toFixed(2)} — acima da tolerância de R$ {TOLERANCE.toFixed(2)}
+            </span>
+          )}
+        </span>
+        {!disabled && (
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={overTolerance} onClick={onConfirm}><Check className="mr-1 h-4 w-4" />Confirmar</Button>
+            <Button size="sm" variant="ghost" onClick={onCancel}><X className="mr-1 h-4 w-4" />Cancelar</Button>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function PendingRow({ entry, allEntries, excludeIds, onPropose, onNoPair, disabled }: {
+  entry: Entry; allEntries: Entry[]; excludeIds: Set<string>;
+  onPropose: (otherId: string) => void; onNoPair: (j: string) => void; disabled: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [noOpen, setNoOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [justification, setJustification] = useState("");
-  const opposite = allEntries.filter((e) => e.source !== entry.source);
-  const filtered = opposite.filter((e) => {
-    const s = search.toLowerCase();
-    return !s || (e.description ?? "").toLowerCase().includes(s) || String(e.amount).includes(s) || (e.beneficiary ?? "").toLowerCase().includes(s);
-  });
+  // Candidatos do lado oposto que não estão presos a nenhum vínculo ativo nem a
+  // uma proposta de casamento manual ainda não confirmada (excludeIds).
+  const opposite = allEntries.filter((e) => e.source !== entry.source && !excludeIds.has(e.id));
   // Diferença 1:1 entre o lançamento pendente e um candidato (sinais C/D).
   const pairDiff = (candidate: Entry) => {
     const bb = entry.source === "bb" ? entry : candidate;
     const ag = entry.source === "agrotis" ? entry : candidate;
     return Number((signedAmount(bb) - signedAmount(ag)).toFixed(2));
   };
+  // Ordena por menor diferença absoluta de valor: o mais próximo aparece primeiro.
+  const filtered = opposite
+    .filter((e) => {
+      const s = search.toLowerCase();
+      return !s || (e.description ?? "").toLowerCase().includes(s) || String(e.amount).includes(s) || (e.beneficiary ?? "").toLowerCase().includes(s);
+    })
+    .sort((a, b) => Math.abs(pairDiff(a)) - Math.abs(pairDiff(b)));
 
   return (
     <Card className="p-3">
@@ -513,7 +588,7 @@ function PendingRow({ entry, allEntries, onManual, onNoPair, disabled }: {
                   return (
                     <button key={e.id} type="button" disabled={over}
                       className="w-full text-left disabled:cursor-not-allowed disabled:opacity-60"
-                      onClick={() => { onManual(e.id); setOpen(false); }}>
+                      onClick={() => { onPropose(e.id); setOpen(false); setSearch(""); }}>
                       <EntryCard e={e} label={e.source === "bb" ? "BB" : "Agrotis"} />
                       <div className={`px-1 pb-1 text-xs ${over ? "font-medium text-rose-600" : "text-emerald-600"}`}>
                         Diferença R$ {Math.abs(d).toFixed(2)}{over ? ` — acima da tolerância de R$ ${TOLERANCE.toFixed(2)}` : ""}

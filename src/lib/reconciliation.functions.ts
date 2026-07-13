@@ -88,7 +88,8 @@ Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays.
     throw new Error("Formato inesperado da IA: " + (e as Error).message);
   }
 
-  // Rebaixa "strong" -> "medium" quando a similaridade de nomes < 70%.
+  // Similaridade de nome (coeficiente de Dice sobre bigramas) usada para
+  // classificar a confiança das sugestões abaixo.
   const norm = (s: string | null | undefined) =>
     (s ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
@@ -108,31 +109,43 @@ Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays.
   };
   const nameOf = (e: z.infer<typeof AiEntry>) =>
     norm(e.beneficiary) || norm(e.description);
-  parsed.matches = parsed.matches.map((m) => {
-    if (m.confidence !== "strong") return m;
-    const bb = parsed.bb_entries[m.bb_index];
-    const ag = parsed.agrotis_entries[m.agrotis_index];
-    if (!bb || !ag) return m;
-    const a = nameOf(bb), b = nameOf(ag);
-    if (!a || !b) return m;
-    const sim = dice(a, b);
-    if (sim < 0.7) {
-      return { ...m, confidence: "medium" as const,
-        reason: `${m.reason} (rebaixado: similaridade de nome ${(sim * 100).toFixed(0)}%)` };
-    }
-    return m;
-  });
-
-  // Uma sugestão (forte ou média) só é válida se os valores, com sinal C/D,
-  // baterem dentro da tolerância (R$ 1,00). Se o valor diverge, o casamento é
-  // removido e os lançamentos ficam pendentes — nunca existe sugestão "média"
-  // com valor diferente. A data pode diferir (até 2 dias) e o nome pode diferir.
   const signed = (e: z.infer<typeof AiEntry>) => (e.entry_type === "C" ? 1 : -1) * e.amount;
+
+  // 1) Um casamento só é válido se os valores (com sinal C/D) baterem dentro da
+  //    tolerância (R$ 1,00) — a mesma medida usada na confirmação. Se divergir, o
+  //    par é removido e os lançamentos ficam pendentes. Nunca há sugestão com
+  //    valor diferente.
   parsed.matches = parsed.matches.filter((m) => {
     const bb = parsed.bb_entries[m.bb_index];
     const ag = parsed.agrotis_entries[m.agrotis_index];
     if (!bb || !ag) return false;
     return Math.abs(signed(bb) - signed(ag)) <= MATCH_TOLERANCE;
+  });
+
+  // 2) Classificação DETERMINÍSTICA de confiança (não depende do rótulo da IA):
+  //    FORTE  = valor idêntico (garantido no passo 1) + MESMA data + nome com
+  //             similaridade > 70%. Pares perfeitos são SEMPRE fortes — corrige o
+  //             bug em que a IA marcava um par exato como média e ele nunca era
+  //             promovido.
+  //    MÉDIA  = demais casos (data difere e/ou nome não bate). Quando não há nome
+  //             em algum dos lados, mantém a classificação original da IA.
+  parsed.matches = parsed.matches.map((m) => {
+    const bb = parsed.bb_entries[m.bb_index];
+    const ag = parsed.agrotis_entries[m.agrotis_index];
+    if (!bb || !ag) return m;
+    const sameDate = !!bb.entry_date && bb.entry_date === ag.entry_date;
+    const a = nameOf(bb), b = nameOf(ag);
+    const namesPresent = !!a && !!b;
+    const sim = namesPresent ? dice(a, b) : 0;
+
+    if (sameDate && namesPresent && sim > 0.7) {
+      return m.confidence === "strong" ? m : { ...m, confidence: "strong" as const };
+    }
+    if (m.confidence === "strong" && namesPresent) {
+      const motivo = !sameDate ? "data diferente" : `similaridade de nome ${(sim * 100).toFixed(0)}%`;
+      return { ...m, confidence: "medium" as const, reason: `${m.reason} (rebaixado: ${motivo})` };
+    }
+    return m;
   });
   return parsed;
 }
