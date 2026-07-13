@@ -88,6 +88,25 @@ Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays.
     throw new Error("Formato inesperado da IA: " + (e as Error).message);
   }
 
+  // === DEBUG: saída CRUA da IA (antes de qualquer pós-processamento) ===
+  const descEntry = (e: z.infer<typeof AiEntry> | undefined) =>
+    e ? `[${e.entry_type} ${e.amount} ${e.entry_date} "${e.beneficiary ?? e.description ?? ""}"]` : "<inválido>";
+  console.log("[extractReconciliation] === RAW IA ===", {
+    bb_entries: parsed.bb_entries.length,
+    agrotis_entries: parsed.agrotis_entries.length,
+    matches: parsed.matches.length,
+  });
+  console.log("[extractReconciliation] BB entries:",
+    parsed.bb_entries.map((e, i) => `#${i} ${descEntry(e)}`));
+  console.log("[extractReconciliation] AG entries:",
+    parsed.agrotis_entries.map((e, i) => `#${i} ${descEntry(e)}`));
+  parsed.matches.forEach((m, i) => {
+    console.log(`[extractReconciliation] RAW match #${i}: conf=${m.confidence} ` +
+      `bb_index=${m.bb_index} ag_index=${m.agrotis_index} ` +
+      `BB=${descEntry(parsed.bb_entries[m.bb_index])} AG=${descEntry(parsed.agrotis_entries[m.agrotis_index])} ` +
+      `reason="${m.reason}"`);
+  });
+
   // Similaridade de nome (coeficiente de Dice sobre bigramas) usada para
   // classificar a confiança das sugestões abaixo.
   const norm = (s: string | null | undefined) =>
@@ -118,8 +137,17 @@ Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays.
   parsed.matches = parsed.matches.filter((m) => {
     const bb = parsed.bb_entries[m.bb_index];
     const ag = parsed.agrotis_entries[m.agrotis_index];
-    if (!bb || !ag) return false;
-    return Math.abs(signed(bb) - signed(ag)) <= MATCH_TOLERANCE;
+    if (!bb || !ag) {
+      console.log(`[extractReconciliation] DESCARTADO (índice inválido): bb_index=${m.bb_index} ag_index=${m.agrotis_index}`);
+      return false;
+    }
+    const valueDiff = Math.abs(signed(bb) - signed(ag));
+    if (valueDiff > MATCH_TOLERANCE) {
+      console.log(`[extractReconciliation] DESCARTADO (valor difere R$ ${valueDiff.toFixed(2)} > tolerância R$ ${MATCH_TOLERANCE.toFixed(2)}): ` +
+        `BB=${descEntry(bb)} AG=${descEntry(ag)}`);
+      return false;
+    }
+    return true;
   });
 
   // 2) Classificação DETERMINÍSTICA de confiança (não depende do rótulo da IA):
@@ -137,15 +165,21 @@ Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays.
     const a = nameOf(bb), b = nameOf(ag);
     const namesPresent = !!a && !!b;
     const sim = namesPresent ? dice(a, b) : 0;
+    const valueDiff = Math.abs(signed(bb) - signed(ag));
 
+    let next = m;
     if (sameDate && namesPresent && sim > 0.7) {
-      return m.confidence === "strong" ? m : { ...m, confidence: "strong" as const };
-    }
-    if (m.confidence === "strong" && namesPresent) {
+      next = m.confidence === "strong" ? m : { ...m, confidence: "strong" as const };
+    } else if (m.confidence === "strong" && namesPresent) {
       const motivo = !sameDate ? "data diferente" : `similaridade de nome ${(sim * 100).toFixed(0)}%`;
-      return { ...m, confidence: "medium" as const, reason: `${m.reason} (rebaixado: ${motivo})` };
+      next = { ...m, confidence: "medium" as const, reason: `${m.reason} (rebaixado: ${motivo})` };
     }
-    return m;
+    // === DEBUG: por que este par virou (ou não) sugestão forte ===
+    console.log(`[extractReconciliation] classificação: BB=${descEntry(bb)} AG=${descEntry(ag)} ` +
+      `| valorDiff=R$${valueDiff.toFixed(2)} mesmaData=${sameDate} nomeBB="${a}" nomeAG="${b}" ` +
+      `nomeSim=${(sim * 100).toFixed(0)}% namesPresent=${namesPresent} ` +
+      `| IA=${m.confidence} => ${next.confidence}`);
+    return next;
   });
   return parsed;
 }
