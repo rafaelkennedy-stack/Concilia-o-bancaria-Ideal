@@ -2,17 +2,9 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
-const ProcessInput = z.object({
-  reconciliationDate: z.string(),
-  bankAccountId: z.string().uuid(),
-  bbFileName: z.string(),
-  bbText: z.string().min(1),
-  agrotisFileName: z.string(),
-  agrotisText: z.string().min(1),
-  balanceBank: z.number().nullable().optional(),
-  balanceAgrotisPrevious: z.number().nullable().optional(),
-});
-
+// Lançamento já estruturado (tipo C/D e valor extraídos deterministicamente no
+// cliente, em file-extract.ts). A IA NÃO extrai mais lançamentos — só faz o
+// matching por nome/contexto.
 const AiEntry = z.object({
   entry_date: z.string().nullable(),
   description: z.string(),
@@ -21,19 +13,28 @@ const AiEntry = z.object({
   entry_type: z.enum(["C", "D"]),
   document_ref: z.string().nullable(),
 });
+type Entry = z.infer<typeof AiEntry>;
 
-const AiResult = z.object({
-  bb_entries: z.array(AiEntry),
-  agrotis_entries: z.array(AiEntry),
-  matches: z.array(
-    z.object({
-      bb_index: z.number(),
-      agrotis_index: z.number(),
-      confidence: z.enum(["strong", "medium"]),
-      reason: z.string(),
-    }),
-  ),
+const ProcessInput = z.object({
+  reconciliationDate: z.string(),
+  bankAccountId: z.string().uuid(),
+  bbFileName: z.string(),
+  bbEntries: z.array(AiEntry),
+  agrotisFileName: z.string(),
+  agrotisEntries: z.array(AiEntry),
+  balanceBank: z.number().nullable().optional(),
+  balanceAgrotisPrevious: z.number().nullable().optional(),
 });
+
+// A IA agora devolve APENAS casamentos (índices), não lançamentos.
+const AiMatch = z.object({
+  bb_index: z.number(),
+  agrotis_index: z.number(),
+  confidence: z.enum(["strong", "medium"]),
+  reason: z.string(),
+});
+const AiMatchResult = z.object({ matches: z.array(AiMatch) });
+type Match = z.infer<typeof AiMatch>;
 
 
 
@@ -41,74 +42,14 @@ const AiResult = z.object({
 // o rebaixamento de "strong" -> "medium" quando a similaridade de nomes é baixa.
 // Compartilhado entre a conciliação de um dia (processReconciliation) e a
 // conciliação em massa de vários dias (processMassReconciliation).
-async function extractReconciliation(bbText: string, agrotisText: string) {
-  const { createAnthropicClient, RECONCILIATION_MODEL } = await import("@/lib/ai-gateway.server");
-  const anthropic = createAnthropicClient();
+async function extractReconciliation(bbEntries: Entry[], agrotisEntries: Entry[]) {
+  const bb_entries = bbEntries;
+  const agrotis_entries = agrotisEntries;
 
-  const prompt = `Você é um assistente contábil especializado em conciliação bancária.
-
-Extrai os lançamentos de dois extratos e sugere casamentos. Os extratos podem
-cobrir VÁRIOS DIAS — extraia a data (entry_date) correta de CADA lançamento.
-
-EXTRATO BB (Excel convertido para CSV):
-${bbText.slice(0, 40000)}
-
-EXTRATO AGROTIS (texto do PDF):
-${agrotisText.slice(0, 40000)}
-
-Regras para casamentos:
-- STRONG: valor idêntico (tolerância R$ 1,00) + mesma data (tolerância 0 dias) + tipo igual (C/D) + nome do beneficiário similar quando disponível
-- MEDIUM: valor + tipo batem mas data difere em até 2 dias
-- Se não achar par, não inclua nos matches
-
-Retorne APENAS JSON válido no formato:
-{
-  "bb_entries": [{"entry_date":"YYYY-MM-DD","description":"...","beneficiary":"...","amount":123.45,"entry_type":"C"|"D","document_ref":"..."}],
-  "agrotis_entries": [...mesmo formato...],
-  "matches": [{"bb_index": 0, "agrotis_index": 0, "confidence": "strong"|"medium", "reason": "..."}]
-}
-
-Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays. entry_type = "C" para crédito, "D" para débito. amount sempre positivo.`;
-
-  const message = await anthropic.messages.create({
-    model: RECONCILIATION_MODEL,
-    max_tokens: 16000,
-    messages: [{ role: "user", content: prompt }],
-  });
-  if (message.stop_reason === "refusal") throw new Error("IA recusou a solicitação");
-  const text = message.content
-    .map((block) => (block.type === "text" ? block.text : ""))
-    .join("");
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error("IA não retornou JSON");
-  let parsed;
-  try {
-    parsed = AiResult.parse(JSON.parse(jsonMatch[0]));
-  } catch (e) {
-    throw new Error("Formato inesperado da IA: " + (e as Error).message);
-  }
-
-  // === DEBUG: saída CRUA da IA (antes de qualquer pós-processamento) ===
-  const descEntry = (e: z.infer<typeof AiEntry> | undefined) =>
+  const descEntry = (e: Entry | undefined) =>
     e ? `[${e.entry_type} ${e.amount} ${e.entry_date} "${e.beneficiary ?? e.description ?? ""}"]` : "<inválido>";
-  console.log("[extractReconciliation] === RAW IA ===", {
-    bb_entries: parsed.bb_entries.length,
-    agrotis_entries: parsed.agrotis_entries.length,
-    matches: parsed.matches.length,
-  });
-  console.log("[extractReconciliation] BB entries:",
-    parsed.bb_entries.map((e, i) => `#${i} ${descEntry(e)}`));
-  console.log("[extractReconciliation] AG entries:",
-    parsed.agrotis_entries.map((e, i) => `#${i} ${descEntry(e)}`));
-  parsed.matches.forEach((m, i) => {
-    console.log(`[extractReconciliation] RAW match #${i}: conf=${m.confidence} ` +
-      `bb_index=${m.bb_index} ag_index=${m.agrotis_index} ` +
-      `BB=${descEntry(parsed.bb_entries[m.bb_index])} AG=${descEntry(parsed.agrotis_entries[m.agrotis_index])} ` +
-      `reason="${m.reason}"`);
-  });
 
-  // Similaridade de nome (coeficiente de Dice sobre bigramas) usada para
-  // classificar a confiança das sugestões abaixo.
+  // Similaridade de nome (coeficiente de Dice sobre bigramas).
   const norm = (s: string | null | undefined) =>
     (s ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
@@ -126,47 +67,87 @@ Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays.
     A.forEach((g) => { if (B.has(g)) inter++; });
     return (2 * inter) / (A.size + B.size);
   };
-  const nameOf = (e: z.infer<typeof AiEntry>) =>
-    norm(e.beneficiary) || norm(e.description);
-  const signed = (e: z.infer<typeof AiEntry>) => (e.entry_type === "C" ? 1 : -1) * e.amount;
+  const nameOf = (e: Entry) => norm(e.beneficiary) || norm(e.description);
+  // signed() embute a equivalência de tipo (confirmada pelo BalanceCard e agora
+  // pela extração determinística): BB "C" (entrada) ↔ Agrotis "C" (entrada) e
+  // BB "D" (saída) ↔ Agrotis "D" (saída). MESMO tipo => diferença ≈ 0; tipos
+  // opostos => |diferença| ≈ 2× valor, acima da tolerância.
+  const signed = (e: Entry) => (e.entry_type === "C" ? 1 : -1) * e.amount;
+  const dateDiffDays = (a: string | null, b: string | null): number | null => {
+    if (!a || !b) return null;
+    const da = Date.parse(a + "T00:00:00Z");
+    const db = Date.parse(b + "T00:00:00Z");
+    if (Number.isNaN(da) || Number.isNaN(db)) return null;
+    return Math.round(Math.abs(da - db) / 86_400_000);
+  };
 
-  // 1) Um casamento só é válido se os valores (com sinal C/D) baterem dentro da
-  //    tolerância (R$ 1,00) — a mesma medida usada na confirmação. Se divergir, o
-  //    par é removido e os lançamentos ficam pendentes. Nunca há sugestão com
-  //    valor diferente.
-  parsed.matches = parsed.matches.filter((m) => {
-    const bb = parsed.bb_entries[m.bb_index];
-    const ag = parsed.agrotis_entries[m.agrotis_index];
+  console.log(`[extractReconciliation] entradas estruturadas: BB=${bb_entries.length} Agrotis=${agrotis_entries.length}`);
+
+  // === PRÉ-MATCHING DETERMINÍSTICO ===
+  // Casa pares com valor idêntico (≤ R$ 1,00), MESMO tipo (via signed) e data
+  // ±1 dia. Atribuição 1:1 gulosa: menor diferença de valor, depois de data,
+  // depois maior similaridade de nome (desempate). Cada par vira sugestão FORTE.
+  const usedBb = new Set<number>();
+  const usedAg = new Set<number>();
+  const candidates: Array<{ i: number; j: number; valueDiff: number; dayDiff: number; sim: number }> = [];
+  bb_entries.forEach((bb, i) => {
+    agrotis_entries.forEach((ag, j) => {
+      const valueDiff = Math.abs(signed(bb) - signed(ag));
+      if (valueDiff > MATCH_TOLERANCE) return;       // valor + tipo precisam bater
+      const dayDiff = dateDiffDays(bb.entry_date, ag.entry_date);
+      if (dayDiff == null || dayDiff > 1) return;    // data ±1 dia
+      candidates.push({ i, j, valueDiff, dayDiff, sim: dice(nameOf(bb), nameOf(ag)) });
+    });
+  });
+  candidates.sort((x, y) => x.valueDiff - y.valueDiff || x.dayDiff - y.dayDiff || y.sim - x.sim);
+  const preMatches: Match[] = [];
+  for (const c of candidates) {
+    if (usedBb.has(c.i) || usedAg.has(c.j)) continue;
+    usedBb.add(c.i); usedAg.add(c.j);
+    preMatches.push({
+      bb_index: c.i,
+      agrotis_index: c.j,
+      confidence: "strong",
+      reason: `Pré-casamento automático (valor idêntico, data ±1 dia, mesmo tipo${c.sim > 0 ? `, nome ${(c.sim * 100).toFixed(0)}%` : ""})`,
+    });
+    console.log(`[extractReconciliation] PRÉ-MATCH forte: BB=${descEntry(bb_entries[c.i])} AG=${descEntry(agrotis_entries[c.j])} ` +
+      `| valorDiff=R$${c.valueDiff.toFixed(2)} dataDiff=${c.dayDiff}d nomeSim=${(c.sim * 100).toFixed(0)}%`);
+  }
+  console.log(`[extractReconciliation] pré-matches determinísticos: ${preMatches.length}`);
+
+  // === MATCHING POR IA (apenas pares não exatos; a IA NÃO extrai lançamentos) ===
+  let aiMatches: Match[] = [];
+  try {
+    aiMatches = await aiMatchOnly(bb_entries, agrotis_entries, usedBb, usedAg);
+  } catch (e) {
+    console.log("[extractReconciliation] matching por IA falhou (seguindo só com pré-matches):", (e as Error).message);
+  }
+  // Valida os matches da IA: índice válido, não pré-casado, mesmo valor/tipo.
+  // Marca como usados para a IA não repetir um índice em dois matches.
+  aiMatches = aiMatches.filter((m) => {
+    if (usedBb.has(m.bb_index) || usedAg.has(m.agrotis_index)) return false;
+    const bb = bb_entries[m.bb_index];
+    const ag = agrotis_entries[m.agrotis_index];
     if (!bb || !ag) {
-      console.log(`[extractReconciliation] DESCARTADO (índice inválido): bb_index=${m.bb_index} ag_index=${m.agrotis_index}`);
+      console.log(`[extractReconciliation] match da IA DESCARTADO (índice inválido): bb=${m.bb_index} ag=${m.agrotis_index}`);
       return false;
     }
     const valueDiff = Math.abs(signed(bb) - signed(ag));
     if (valueDiff > MATCH_TOLERANCE) {
-      console.log(`[extractReconciliation] DESCARTADO (valor difere R$ ${valueDiff.toFixed(2)} > tolerância R$ ${MATCH_TOLERANCE.toFixed(2)}): ` +
-        `BB=${descEntry(bb)} AG=${descEntry(ag)}`);
+      console.log(`[extractReconciliation] match da IA DESCARTADO (valor/tipo divergem R$ ${valueDiff.toFixed(2)}): BB=${descEntry(bb)} AG=${descEntry(ag)}`);
       return false;
     }
+    usedBb.add(m.bb_index); usedAg.add(m.agrotis_index);
     return true;
   });
-
-  // 2) Classificação DETERMINÍSTICA de confiança (não depende do rótulo da IA):
-  //    FORTE  = valor idêntico (garantido no passo 1) + MESMA data + nome com
-  //             similaridade > 70%. Pares perfeitos são SEMPRE fortes — corrige o
-  //             bug em que a IA marcava um par exato como média e ele nunca era
-  //             promovido.
-  //    MÉDIA  = demais casos (data difere e/ou nome não bate). Quando não há nome
-  //             em algum dos lados, mantém a classificação original da IA.
-  parsed.matches = parsed.matches.map((m) => {
-    const bb = parsed.bb_entries[m.bb_index];
-    const ag = parsed.agrotis_entries[m.agrotis_index];
-    if (!bb || !ag) return m;
+  // Classificação determinística: FORTE se mesma data + nome > 70%; senão MÉDIA.
+  aiMatches = aiMatches.map((m) => {
+    const bb = bb_entries[m.bb_index];
+    const ag = agrotis_entries[m.agrotis_index];
     const sameDate = !!bb.entry_date && bb.entry_date === ag.entry_date;
     const a = nameOf(bb), b = nameOf(ag);
     const namesPresent = !!a && !!b;
     const sim = namesPresent ? dice(a, b) : 0;
-    const valueDiff = Math.abs(signed(bb) - signed(ag));
-
     let next = m;
     if (sameDate && namesPresent && sim > 0.7) {
       next = m.confidence === "strong" ? m : { ...m, confidence: "strong" as const };
@@ -174,14 +155,56 @@ Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays.
       const motivo = !sameDate ? "data diferente" : `similaridade de nome ${(sim * 100).toFixed(0)}%`;
       next = { ...m, confidence: "medium" as const, reason: `${m.reason} (rebaixado: ${motivo})` };
     }
-    // === DEBUG: por que este par virou (ou não) sugestão forte ===
-    console.log(`[extractReconciliation] classificação: BB=${descEntry(bb)} AG=${descEntry(ag)} ` +
-      `| valorDiff=R$${valueDiff.toFixed(2)} mesmaData=${sameDate} nomeBB="${a}" nomeAG="${b}" ` +
-      `nomeSim=${(sim * 100).toFixed(0)}% namesPresent=${namesPresent} ` +
-      `| IA=${m.confidence} => ${next.confidence}`);
+    console.log(`[extractReconciliation] match IA: BB=${descEntry(bb)} AG=${descEntry(ag)} | mesmaData=${sameDate} nomeSim=${(sim * 100).toFixed(0)}% => ${next.confidence}`);
     return next;
   });
-  return parsed;
+
+  console.log(`[extractReconciliation] total de casamentos: ${preMatches.length + aiMatches.length} (pré ${preMatches.length} + IA ${aiMatches.length})`);
+  return { bb_entries, agrotis_entries, matches: [...preMatches, ...aiMatches] };
+}
+
+// Pede à IA APENAS os casamentos entre lançamentos JÁ estruturados (com tipo e
+// valor definidos deterministicamente). Ignora os índices já pré-casados.
+async function aiMatchOnly(
+  bb_entries: Entry[], agrotis_entries: Entry[], usedBb: Set<number>, usedAg: Set<number>,
+): Promise<Match[]> {
+  const { createAnthropicClient, RECONCILIATION_MODEL } = await import("@/lib/ai-gateway.server");
+  const line = (e: Entry, i: number) =>
+    `  ${i}: ${e.entry_type} R$ ${e.amount.toFixed(2)} ${e.entry_date ?? "?"} "${(e.beneficiary ?? e.description ?? "").slice(0, 60)}"`;
+  const bbList = bb_entries.map((e, i) => (usedBb.has(i) ? null : line(e, i))).filter(Boolean).join("\n");
+  const agList = agrotis_entries.map((e, i) => (usedAg.has(i) ? null : line(e, i))).filter(Boolean).join("\n");
+  if (!bbList || !agList) return [];  // nada restante para casar
+
+  const prompt = `Você faz conciliação bancária. Recebe lançamentos JÁ estruturados (tipo C/D e
+valor definidos) de dois extratos: Banco do Brasil (BB) e Agrotis. Case os que
+representam a MESMA transação.
+
+Regras ESTRITAS:
+- Só case lançamentos de MESMO tipo (C com C, D com D) e valor idêntico (diferença ≤ R$ 1,00).
+- A data pode diferir em até 2 dias.
+- Use o nome/beneficiário como contexto para decidir o par correto.
+- confidence "strong" quando o nome bate bem; "medium" quando batem só valor+tipo+data.
+- Use APENAS os índices listados abaixo; cada índice no máximo uma vez.
+
+BB (índice: tipo valor data "nome"):
+${bbList}
+
+AGROTIS (índice: tipo valor data "nome"):
+${agList}
+
+Retorne APENAS JSON: {"matches":[{"bb_index":0,"agrotis_index":0,"confidence":"strong"|"medium","reason":"..."}]}`;
+
+  const anthropic = createAnthropicClient();
+  const message = await anthropic.messages.create({
+    model: RECONCILIATION_MODEL,
+    max_tokens: 8000,
+    messages: [{ role: "user", content: prompt }],
+  });
+  if (message.stop_reason === "refusal") throw new Error("IA recusou a solicitação");
+  const text = message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("IA não retornou JSON");
+  return AiMatchResult.parse(JSON.parse(jsonMatch[0])).matches;
 }
 
 export const processReconciliation = createServerFn({ method: "POST" })
@@ -189,9 +212,9 @@ export const processReconciliation = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => ProcessInput.parse(d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
-    // O rebaixamento de similaridade de nome já é aplicado dentro de
-    // extractReconciliation.
-    const parsed = await extractReconciliation(data.bbText, data.agrotisText);
+    // Lançamentos já vêm estruturados do cliente (tipo/valor determinísticos);
+    // extractReconciliation só faz o casamento (pré-match + IA por nome).
+    const parsed = await extractReconciliation(data.bbEntries, data.agrotisEntries);
 
     // Fetch bank account to derive account label
     const { data: acct, error: acctErr } = await supabase
@@ -632,9 +655,9 @@ export const reopenWithNewFiles = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => z.object({
     reconciliationId: z.string().uuid(),
     bbFileName: z.string(),
-    bbText: z.string().min(1),
+    bbEntries: z.array(AiEntry),
     agrotisFileName: z.string(),
-    agrotisText: z.string().min(1),
+    agrotisEntries: z.array(AiEntry),
     balanceBank: z.number().nullable().optional(),
     balanceAgrotisPrevious: z.number().nullable().optional(),
   }).parse(d))
@@ -647,9 +670,9 @@ export const reopenWithNewFiles = createServerFn({ method: "POST" })
       .select("id").eq("id", data.reconciliationId).single();
     if (rErr || !rec) throw new Error(rErr?.message || "Conciliação não encontrada");
 
-    // Extrai os novos lançamentos ANTES de apagar os antigos: se a IA falhar,
+    // Casa os novos lançamentos ANTES de apagar os antigos: se o casamento falhar,
     // a conciliação permanece intacta.
-    const parsed = await extractReconciliation(data.bbText, data.agrotisText);
+    const parsed = await extractReconciliation(data.bbEntries, data.agrotisEntries);
 
     // Apaga casamentos e lançamentos atuais. (Apagar os lançamentos já removeria
     // os casamentos por cascade, mas removemos os matches explicitamente primeiro
@@ -775,9 +798,9 @@ export const resetDailyStatus = createServerFn({ method: "POST" })
 const MassInput = z.object({
   bankAccountId: z.string().uuid(),
   bbFileName: z.string(),
-  bbText: z.string().min(1),
+  bbEntries: z.array(AiEntry),
   agrotisFileName: z.string(),
-  agrotisText: z.string().min(1),
+  agrotisEntries: z.array(AiEntry),
 });
 
 // Processa extratos que cobrem múltiplos dias. Cria UMA conciliação com status
@@ -789,7 +812,7 @@ export const processMassReconciliation = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => MassInput.parse(d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
-    const parsed = await extractReconciliation(data.bbText, data.agrotisText);
+    const parsed = await extractReconciliation(data.bbEntries, data.agrotisEntries);
 
     const { data: acct, error: acctErr } = await supabase
       .from("bank_accounts").select("bank, entity_name, account_number, active")

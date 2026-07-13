@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { ArrowLeft, Upload, Sparkles } from "lucide-react";
 import { processReconciliation } from "@/lib/reconciliation.functions";
+import { parseBbEntries, parseAgrotisEntries } from "@/lib/file-extract";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/nova")({
   // Permite abrir o fluxo já com a conta e a data pré-selecionadas a partir da
@@ -123,19 +124,23 @@ function New() {
     setBusy(true);
     try {
       toast.info("Lendo arquivos…");
-      const [bbText, agrotisText] = await Promise.all([parseExcel(bb), parsePdf(ag)]);
-      if (!bbText?.trim()) throw new Error("Não foi possível extrair texto do Excel BB.");
-      if (!agrotisText?.trim()) throw new Error("Não foi possível extrair texto do PDF Agrotis.");
+      // Lançamentos extraídos deterministicamente (tipo C/D e valor lidos das
+      // colunas). O texto bruto é usado só para os saldos.
+      const [bbEntries, agrotisEntries, bbText, agrotisText] = await Promise.all([
+        parseBbEntries(bb), parseAgrotisEntries(ag), parseExcel(bb), parsePdf(ag),
+      ]);
+      if (!bbEntries.length) throw new Error("Nenhum lançamento lido do Excel do BB.");
+      if (!agrotisEntries.length) throw new Error("Nenhum lançamento lido do PDF do Agrotis.");
       const balanceBank = extractBankBalance(bbText);
       const balanceAgrotisPrevious = extractAgrotisPrevious(agrotisText);
       if (balanceBank == null) toast.warning("Saldo do banco não encontrado — o fechamento poderá pedir revisão.");
       if (balanceAgrotisPrevious == null) toast.warning("Saldo anterior Agrotis não encontrado — validação da cadeia ficará indisponível.");
-      toast.info("Processando com IA…", { description: "Isso pode levar alguns segundos." });
+      toast.info("Casando com IA…", { description: "Isso pode levar alguns segundos." });
       const { reconciliationId } = await process({ data: {
         reconciliationDate: date,
         bankAccountId: accountId,
-        bbFileName: bb.name, bbText,
-        agrotisFileName: ag.name, agrotisText,
+        bbFileName: bb.name, bbEntries,
+        agrotisFileName: ag.name, agrotisEntries,
         balanceBank, balanceAgrotisPrevious,
       }});
       toast.success("Concluído!");

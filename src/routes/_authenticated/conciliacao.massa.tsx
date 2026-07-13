@@ -14,34 +14,11 @@ import { ArrowLeft, Upload, Sparkles, Layers } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { processMassReconciliation } from "@/lib/reconciliation.functions";
+import { parseBbEntries, parseAgrotisEntries } from "@/lib/file-extract";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/massa")({
   component: Mass,
 });
-
-import * as XLSX from "xlsx";
-import { extractText, getDocumentProxy } from "unpdf";
-
-async function parseExcel(file: File): Promise<string> {
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: "array" });
-  const parts: string[] = [];
-  for (const name of wb.SheetNames) {
-    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name], { FS: " | " });
-    parts.push(`=== Sheet: ${name} ===\n${csv}`);
-  }
-  return parts.join("\n\n");
-}
-
-async function parsePdf(file: File): Promise<string> {
-  const buf = await file.arrayBuffer();
-  const pdf = await getDocumentProxy(new Uint8Array(buf));
-  const result = await extractText(pdf, { mergePages: true });
-  const t: unknown = result.text;
-  if (typeof t === "string") return t;
-  if (Array.isArray(t)) return t.join("\n");
-  return String(t ?? "");
-}
 
 type Account = { id: string; bank: string; entity_name: string; account_number: string | null; active: boolean };
 
@@ -73,14 +50,14 @@ function Mass() {
     setBusy(true);
     try {
       toast.info("Lendo arquivos…");
-      const [bbText, agrotisText] = await Promise.all([parseExcel(bb), parsePdf(ag)]);
-      if (!bbText?.trim()) throw new Error("Não foi possível extrair texto do Excel BB.");
-      if (!agrotisText?.trim()) throw new Error("Não foi possível extrair texto do PDF Agrotis.");
-      toast.info("Processando com IA…", { description: "Isso pode levar alguns segundos." });
+      const [bbEntries, agrotisEntries] = await Promise.all([parseBbEntries(bb), parseAgrotisEntries(ag)]);
+      if (!bbEntries.length) throw new Error("Nenhum lançamento lido do Excel do BB.");
+      if (!agrotisEntries.length) throw new Error("Nenhum lançamento lido do PDF do Agrotis.");
+      toast.info("Casando com IA…", { description: "Isso pode levar alguns segundos." });
       const { reconciliationId, minDate, maxDate, dayCount } = await process({ data: {
         bankAccountId: accountId,
-        bbFileName: bb.name, bbText,
-        agrotisFileName: ag.name, agrotisText,
+        bbFileName: bb.name, bbEntries,
+        agrotisFileName: ag.name, agrotisEntries,
       }});
       toast.success(
         `Encontrei lançamentos de ${dayCount} dia${dayCount === 1 ? "" : "s"}: ${fmtDate(minDate)} a ${fmtDate(maxDate)}`,

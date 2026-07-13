@@ -25,7 +25,7 @@ import {
   rejectSuggestion, confirmGroupedMatch, closeMassReconciliation, reopenWithNewFiles,
   reassignAndConfirmMatch,
 } from "@/lib/reconciliation.functions";
-import { parseExcel, parsePdf, extractBankBalance, extractAgrotisPrevious } from "@/lib/file-extract";
+import { parseExcel, parsePdf, extractBankBalance, extractAgrotisPrevious, parseBbEntries, parseAgrotisEntries } from "@/lib/file-extract";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/$id")({
   component: Detail,
@@ -976,16 +976,18 @@ function ReopenDialog({ id, onReopened }: { id: string; onReopened: () => void }
     setBusy(true);
     try {
       toast.info("Lendo arquivos…");
-      const [bbText, agrotisText] = await Promise.all([parseExcel(bb), parsePdf(ag)]);
-      if (!bbText?.trim()) throw new Error("Não foi possível extrair texto do Excel BB.");
-      if (!agrotisText?.trim()) throw new Error("Não foi possível extrair texto do PDF Agrotis.");
+      const [bbEntries, agrotisEntries, bbText, agrotisText] = await Promise.all([
+        parseBbEntries(bb), parseAgrotisEntries(ag), parseExcel(bb), parsePdf(ag),
+      ]);
+      if (!bbEntries.length) throw new Error("Nenhum lançamento lido do Excel do BB.");
+      if (!agrotisEntries.length) throw new Error("Nenhum lançamento lido do PDF do Agrotis.");
       const balanceBank = extractBankBalance(bbText);
       const balanceAgrotisPrevious = extractAgrotisPrevious(agrotisText);
       toast.info("Reprocessando com IA…", { description: "Isso pode levar alguns segundos." });
       await reopenFilesFn({ data: {
         reconciliationId: id,
-        bbFileName: bb.name, bbText,
-        agrotisFileName: ag.name, agrotisText,
+        bbFileName: bb.name, bbEntries,
+        agrotisFileName: ag.name, agrotisEntries,
         balanceBank, balanceAgrotisPrevious,
       }});
       toast.success("Conciliação reaberta e reprocessada.");
