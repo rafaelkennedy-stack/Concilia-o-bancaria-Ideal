@@ -122,6 +122,18 @@ Onde bb_index e agrotis_index são os índices (0-based) nos respectivos arrays.
     }
     return m;
   });
+
+  // Uma sugestão (forte ou média) só é válida se os valores, com sinal C/D,
+  // baterem dentro da tolerância (R$ 1,00). Se o valor diverge, o casamento é
+  // removido e os lançamentos ficam pendentes — nunca existe sugestão "média"
+  // com valor diferente. A data pode diferir (até 2 dias) e o nome pode diferir.
+  const signed = (e: z.infer<typeof AiEntry>) => (e.entry_type === "C" ? 1 : -1) * e.amount;
+  parsed.matches = parsed.matches.filter((m) => {
+    const bb = parsed.bb_entries[m.bb_index];
+    const ag = parsed.agrotis_entries[m.agrotis_index];
+    if (!bb || !ag) return false;
+    return Math.abs(signed(bb) - signed(ag)) <= MATCH_TOLERANCE;
+  });
   return parsed;
 }
 
@@ -307,6 +319,39 @@ export const reassignMatch = createServerFn({ method: "POST" })
     await supabase.from("reconciliation_audit_log").insert({
       reconciliation_id: m!.reconciliation_id, user_id: userId, action: "match_reassigned",
       details: { match_id: data.matchId, side: data.side, new_entry_id: data.newEntryId },
+    });
+    return { ok: true };
+  });
+
+// Aplica um novo par (BB + Agrotis) proposto na tela e confirma o casamento numa
+// única operação. Usado pelo botão "Confirmar" quando o usuário alterou o vínculo
+// no modal (que não persiste nada por si só). Valida a tolerância no par FINAL.
+export const reassignAndConfirmMatch = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({
+    matchId: z.string().uuid(),
+    bbEntryId: z.string().uuid(),
+    agrotisEntryId: z.string().uuid(),
+  }).parse(d))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { data: cur } = await supabase.from("reconciliation_matches")
+      .select("reconciliation_id").eq("id", data.matchId).single();
+    if (!cur) throw new Error("Casamento não encontrado");
+    await assertMatchWithinTolerance(supabase, data.bbEntryId, data.agrotisEntryId);
+    const { error } = await supabase.from("reconciliation_matches").update({
+      bb_entry_id: data.bbEntryId,
+      agrotis_entry_id: data.agrotisEntryId,
+      status: "manual",
+      confidence: "pending",
+      reason: null,
+      confirmed_by: userId,
+      confirmed_at: new Date().toISOString(),
+    }).eq("id", data.matchId);
+    if (error) throw new Error(error.message);
+    await supabase.from("reconciliation_audit_log").insert({
+      reconciliation_id: cur.reconciliation_id, user_id: userId, action: "match_reassigned_confirmed",
+      details: { match_id: data.matchId, bb_entry_id: data.bbEntryId, agrotis_entry_id: data.agrotisEntryId },
     });
     return { ok: true };
   });

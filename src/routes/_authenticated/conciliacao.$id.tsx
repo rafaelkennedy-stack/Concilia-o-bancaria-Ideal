@@ -22,7 +22,8 @@ import { useState } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   confirmMatch, manualMatch, justifyNoPair, closeReconciliation, reopenReconciliation,
-  reassignMatch, rejectSuggestion, confirmGroupedMatch, closeMassReconciliation, reopenWithNewFiles,
+  rejectSuggestion, confirmGroupedMatch, closeMassReconciliation, reopenWithNewFiles,
+  reassignAndConfirmMatch,
 } from "@/lib/reconciliation.functions";
 import { parseExcel, parsePdf, extractBankBalance, extractAgrotisPrevious } from "@/lib/file-extract";
 
@@ -60,7 +61,7 @@ function Detail() {
   const reopenFn = useServerFn(reopenReconciliation);
   const noPairFn = useServerFn(justifyNoPair);
   const manualFn = useServerFn(manualMatch);
-  const reassignFn = useServerFn(reassignMatch);
+  const reassignConfirmFn = useServerFn(reassignAndConfirmMatch);
   const rejectFn = useServerFn(rejectSuggestion);
   const groupFn = useServerFn(confirmGroupedMatch);
 
@@ -324,11 +325,11 @@ function Detail() {
         <TabsContent value="revisar" className="space-y-6 pt-4">
           <Section title="Sugestões fortes" tone="strong" count={strong.length}>
             {strong.map((m) => (
-              <SuggestedRow key={m.id} m={m} entries={entries} matchedEntryIds={confirmedEntryIds}
+              <SuggestedRow key={m.id} m={m} entries={entries} matchedEntryIds={matchedEntryIds}
                 disabled={isClosed} onConfirm={() => doConfirm(m.id)}
-                onReassign={async (side, newEntryId) => {
-                  try { await reassignFn({ data: { matchId: m.id, side, newEntryId } });
-                    toast.success("Vínculo alterado"); qc.invalidateQueries({ queryKey: ["reconciliation", id] }); }
+                onConfirmReassign={async (bbId, agId) => {
+                  try { await reassignConfirmFn({ data: { matchId: m.id, bbEntryId: bbId, agrotisEntryId: agId } });
+                    toast.success("Vínculo alterado e confirmado"); qc.invalidateQueries({ queryKey: ["reconciliation", id] }); }
                   catch (err) { toast.error((err as Error).message); }
                 }}
                 onReject={async (justification) => {
@@ -341,11 +342,11 @@ function Detail() {
           </Section>
           <Section title="Sugestões médias" tone="medium" count={medium.length}>
             {medium.map((m) => (
-              <SuggestedRow key={m.id} m={m} entries={entries} matchedEntryIds={confirmedEntryIds}
+              <SuggestedRow key={m.id} m={m} entries={entries} matchedEntryIds={matchedEntryIds}
                 disabled={isClosed} onConfirm={() => doConfirm(m.id)}
-                onReassign={async (side, newEntryId) => {
-                  try { await reassignFn({ data: { matchId: m.id, side, newEntryId } });
-                    toast.success("Vínculo alterado"); qc.invalidateQueries({ queryKey: ["reconciliation", id] }); }
+                onConfirmReassign={async (bbId, agId) => {
+                  try { await reassignConfirmFn({ data: { matchId: m.id, bbEntryId: bbId, agrotisEntryId: agId } });
+                    toast.success("Vínculo alterado e confirmado"); qc.invalidateQueries({ queryKey: ["reconciliation", id] }); }
                   catch (err) { toast.error((err as Error).message); }
                 }}
                 onReject={async (justification) => {
@@ -649,16 +650,26 @@ function GroupedMatchPanel({ eligible, suggestedEntryIds, onConfirm }: {
 }
 
 function SuggestedRow({
-  m, entries, matchedEntryIds, disabled, onConfirm, onReassign, onReject,
+  m, entries, matchedEntryIds, disabled, onConfirm, onConfirmReassign, onReject,
 }: {
   m: Match; entries: Entry[]; matchedEntryIds: Set<string>; disabled: boolean;
   onConfirm: () => void;
-  onReassign: (side: "bb" | "agrotis", newEntryId: string) => void;
+  onConfirmReassign: (bbEntryId: string, agrotisEntryId: string) => void;
   onReject: (justification: string) => void;
 }) {
   const byId = new Map(entries.map((e) => [e.id, e]));
-  const bb = m.bb_entry_id ? byId.get(m.bb_entry_id) : undefined;
-  const ag = m.agrotis_entry_id ? byId.get(m.agrotis_entry_id) : undefined;
+
+  // Alteração de vínculo é apenas LOCAL até o usuário clicar em "Confirmar".
+  // proposedBb/proposedAg guardam o par proposto; a persistência acontece no
+  // botão Confirmar (via onConfirmReassign), nunca ao clicar no modal.
+  const [proposedBb, setProposedBb] = useState<string | null>(null);
+  const [proposedAg, setProposedAg] = useState<string | null>(null);
+  const effBbId = proposedBb ?? m.bb_entry_id;
+  const effAgId = proposedAg ?? m.agrotis_entry_id;
+  const bb = effBbId ? byId.get(effBbId) : undefined;
+  const ag = effAgId ? byId.get(effAgId) : undefined;
+  const hasChange = proposedBb !== null || proposedAg !== null;
+
   const diff = bb && ag ? Number((signedAmount(bb) - signedAmount(ag)).toFixed(2)) : null;
   const overTolerance = diff != null && Math.abs(diff) > TOLERANCE;
 
@@ -668,11 +679,13 @@ function SuggestedRow({
   const [rejectOpen, setRejectOpen] = useState(false);
   const [justification, setJustification] = useState("");
 
-  // available = entries on that side not currently linked in any match,
-  // plus the currently-linked entry on that side (so user can keep it as-is)
-  const currentOnSide = side === "bb" ? m.bb_entry_id : m.agrotis_entry_id;
+  // Candidatos: lançamentos do lado escolhido que NÃO estão em nenhum casamento
+  // ativo (suggested/confirmed/manual/no_pair). matchedEntryIds reúne todos os
+  // lançamentos com vínculo — inclusive os deste casamento —, então apenas
+  // lançamentos totalmente livres aparecem. Exclui o já selecionado neste lado.
+  const currentOnSide = side === "bb" ? effBbId : effAgId;
   const candidates = entries.filter((e) =>
-    e.source === side && (!matchedEntryIds.has(e.id) || e.id === currentOnSide) && e.id !== currentOnSide,
+    e.source === side && !matchedEntryIds.has(e.id) && e.id !== currentOnSide,
   );
   const filtered = candidates.filter((e) => {
     const s = search.toLowerCase();
@@ -680,6 +693,11 @@ function SuggestedRow({
       || String(e.amount).includes(s)
       || (e.beneficiary ?? "").toLowerCase().includes(s);
   });
+
+  const doConfirmClick = () => {
+    if (hasChange && effBbId && effAgId) onConfirmReassign(effBbId, effAgId);
+    else onConfirm();
+  };
 
   return (
     <Card className="p-3">
@@ -689,7 +707,11 @@ function SuggestedRow({
       </div>
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs">
         <span className="text-muted-foreground">
-          {m.reason ?? ""}
+          {hasChange ? (
+            <span className="font-medium text-amber-700 dark:text-amber-400">
+              Alteração proposta — clique em Confirmar para salvar.
+            </span>
+          ) : (m.reason ?? "")}
           {overTolerance && (
             <span className="ml-2 font-medium text-rose-600">
               Diferença R$ {Math.abs(diff!).toFixed(2)} — acima da tolerância de R$ {TOLERANCE.toFixed(2)}
@@ -698,7 +720,13 @@ function SuggestedRow({
         </span>
         {!disabled && (
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" disabled={overTolerance} onClick={onConfirm}><Check className="mr-1 h-4 w-4" />Confirmar</Button>
+            <Button size="sm" disabled={overTolerance} onClick={doConfirmClick}><Check className="mr-1 h-4 w-4" />Confirmar</Button>
+            {hasChange && (
+              <Button size="sm" variant="ghost"
+                onClick={() => { setProposedBb(null); setProposedAg(null); }}>
+                Reverter
+              </Button>
+            )}
 
             <Dialog open={editOpen} onOpenChange={setEditOpen}>
               <DialogTrigger asChild>
@@ -706,6 +734,9 @@ function SuggestedRow({
               </DialogTrigger>
               <DialogContent className="max-w-xl">
                 <DialogHeader><DialogTitle>Alterar vínculo</DialogTitle></DialogHeader>
+                <p className="text-xs text-muted-foreground">
+                  A troca só altera o par mostrado; nada é salvo até clicar em Confirmar.
+                </p>
                 <div className="flex gap-2">
                   <Button size="sm" variant={side === "bb" ? "default" : "outline"} onClick={() => setSide("bb")}>Trocar BB</Button>
                   <Button size="sm" variant={side === "agrotis" ? "default" : "outline"} onClick={() => setSide("agrotis")}>Trocar Agrotis</Button>
@@ -714,7 +745,10 @@ function SuggestedRow({
                 <div className="max-h-80 space-y-1 overflow-auto">
                   {filtered.map((e) => (
                     <button key={e.id} type="button" className="w-full text-left"
-                      onClick={() => { onReassign(side, e.id); setEditOpen(false); setSearch(""); }}>
+                      onClick={() => {
+                        if (side === "bb") setProposedBb(e.id); else setProposedAg(e.id);
+                        setEditOpen(false); setSearch("");
+                      }}>
                       <EntryCard e={e} label={side === "bb" ? "BB" : "Agrotis"} />
                     </button>
                   ))}
