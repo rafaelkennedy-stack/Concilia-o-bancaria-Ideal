@@ -1012,7 +1012,7 @@ function ReopenFileField({ label, accept, file, onChange, disabled }: {
 // Somente Diretor (renderizado apenas nesse caso); a validação de papel também é
 // feita no servidor (reopenWithNewFiles).
 const REOPEN_SIDES: Array<{ value: ReopenSide; label: string; hint: string }> = [
-  { value: "bb", label: "Alterar extrato do banco", hint: "Sobe um novo Excel do BB (.xlsx ou .xls). Os lançamentos do Agrotis são mantidos." },
+  { value: "bb", label: "Alterar extrato do banco", hint: "Sobe um novo Excel do BB (.xlsx, .xls ou .csv). Os lançamentos do Agrotis são mantidos." },
   { value: "agrotis", label: "Alterar extrato do Agrotis", hint: "Sobe um novo .pdf do Agrotis. Os lançamentos do BB são mantidos." },
   { value: "both", label: "Alterar os dois extratos", hint: "Substitui os lançamentos dos dois lados." },
 ];
@@ -1115,8 +1115,8 @@ function ReopenDialog({ id, onReopened }: { id: string; onReopened: () => void }
 
         {needBb && (
           <ReopenFileField
-            label="Novo extrato BB (.xlsx ou .xls)"
-            accept=".xlsx,.xls"
+            label="Novo extrato BB (.xlsx, .xls ou .csv)"
+            accept=".xlsx,.xls,.csv"
             file={bb} onChange={setBb} disabled={busy}
           />
         )}

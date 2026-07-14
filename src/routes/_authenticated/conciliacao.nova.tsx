@@ -13,7 +13,10 @@ import {
 } from "@/components/ui/select";
 import { ArrowLeft, Upload, Sparkles } from "lucide-react";
 import { processReconciliation } from "@/lib/reconciliation.functions";
-import { parseBbEntries, parseAgrotisEntries } from "@/lib/file-extract";
+import {
+  parseBbEntries, parseAgrotisEntries, parseExcel, parsePdf,
+  extractBankBalance, extractAgrotisPrevious,
+} from "@/lib/file-extract";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/nova")({
   // Permite abrir o fluxo já com a conta e a data pré-selecionadas a partir da
@@ -24,74 +27,6 @@ export const Route = createFileRoute("/_authenticated/conciliacao/nova")({
   }),
   component: New,
 });
-
-import * as XLSX from "xlsx";
-import { extractText, getDocumentProxy } from "unpdf";
-
-async function parseExcel(file: File): Promise<string> {
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: "array" });
-  const parts: string[] = [];
-  for (const name of wb.SheetNames) {
-    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name], { FS: " | " });
-    parts.push(`=== Sheet: ${name} ===\n${csv}`);
-  }
-  return parts.join("\n\n");
-}
-
-async function parsePdf(file: File): Promise<string> {
-  const buf = await file.arrayBuffer();
-  const pdf = await getDocumentProxy(new Uint8Array(buf));
-  const result = await extractText(pdf, { mergePages: true });
-  const t: unknown = result.text;
-  if (typeof t === "string") return t;
-  if (Array.isArray(t)) return t.join("\n");
-  return String(t ?? "");
-}
-
-// Parse "R$ 1.234,56" or "1.234,56" or "-1.234,56" or "1,234.56" formats
-function parseBRNumber(raw: string): number | null {
-  const s = raw.replace(/R\$/gi, "").replace(/\s/g, "").trim();
-  if (!s) return null;
-  // Detect Brazilian format (comma decimal)
-  const hasComma = s.includes(",");
-  const cleaned = hasComma ? s.replace(/\./g, "").replace(",", ".") : s.replace(/,/g, "");
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : null;
-}
-
-// Extract "SALDO" line from BB Excel text (letters may be spaced: S A L D O)
-function extractBankBalance(text: string): number | null {
-  // Try spaced pattern first
-  const lines = text.split(/\r?\n/);
-  for (const line of lines) {
-    const norm = line.replace(/\s+/g, " ");
-    if (/\bS\s*A\s*L\s*D\s*O\b/i.test(line) || /\bSALDO\b/i.test(norm)) {
-      // Grab last number-looking token
-      const matches = norm.match(/-?[\d.]+,\d{2}|-?[\d,]+\.\d{2}/g);
-      if (matches && matches.length) {
-        const n = parseBRNumber(matches[matches.length - 1]);
-        if (n != null) return n;
-      }
-    }
-  }
-  return null;
-}
-
-// Extract "saldo anterior" from Agrotis PDF text (first line typically)
-function extractAgrotisPrevious(text: string): number | null {
-  const lines = text.split(/\r?\n/).slice(0, 40);
-  for (const line of lines) {
-    if (/saldo\s*anterior/i.test(line)) {
-      const matches = line.match(/-?[\d.]+,\d{2}|-?[\d,]+\.\d{2}/g);
-      if (matches && matches.length) {
-        const n = parseBRNumber(matches[matches.length - 1]);
-        if (n != null) return n;
-      }
-    }
-  }
-  return null;
-}
 
 type Account = { id: string; bank: string; entity_name: string; account_number: string | null; active: boolean };
 
@@ -192,7 +127,7 @@ function New() {
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
             </div>
             <FileField
-              label="Extrato BB (.xlsx ou .xls)" accept=".xlsx,.xls"
+              label="Extrato BB (.xlsx, .xls ou .csv)" accept=".xlsx,.xls,.csv"
               file={bb} onChange={setBB}
             />
             <FileField

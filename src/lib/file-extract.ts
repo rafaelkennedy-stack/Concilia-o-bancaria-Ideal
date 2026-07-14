@@ -2,10 +2,91 @@
 // pesadas (xlsx, unpdf) são carregadas sob demanda via import dinâmico para não
 // entrarem no bundle inicial das rotas que só precisam delas ocasionalmente.
 
-export async function parseExcel(file: File): Promise<string> {
+// ---- Leitura do extrato bancário: .xlsx, .xls e .csv --------------------------
+//
+// O formato é detectado pelos MAGIC BYTES, não pela extensão (arquivo renomeado é
+// comum): ZIP => .xlsx, OLE/BIFF => .xls, qualquer outra coisa => texto (CSV).
+const MAGIC_XLSX = [0x50, 0x4b];              // "PK"  — zip
+const MAGIC_XLS = [0xd0, 0xcf, 0x11, 0xe0];   // OLE2 compound file
+
+function isBinaryWorkbook(bytes: Uint8Array): boolean {
+  const comeca = (sig: number[]) => sig.every((b, i) => bytes[i] === b);
+  return comeca(MAGIC_XLSX) || comeca(MAGIC_XLS);
+}
+
+// CSV precisa ser decodificado por NÓS antes de entregar ao SheetJS.
+//
+// Motivo: XLSX.read(bytes, {type:"array"}) trata os bytes como latin1. Num CSV em
+// UTF-8 isso transforma "Histórico" em "HistÃ³rico" e a coluna deixa de ser
+// encontrada — e o parse NÃO falha: ele só devolve descrição vazia e, pior, para de
+// reconhecer a linha "Saldo Anterior", que passa a entrar como se fosse lançamento.
+// Decodificando aqui e passando type:"string", o SheetJS detecta o separador
+// (vírgula ou ponto-e-vírgula) sozinho.
+function decodeText(bytes: Uint8Array): string {
+  // BOM de UTF-8.
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder("utf-8").decode(bytes.subarray(3));
+  }
+  // Extratos de banco brasileiro saem muito em windows-1252. Acentos em 1252 são
+  // sequências INVÁLIDAS em UTF-8, então um decode estrito distingue os dois casos.
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return new TextDecoder("windows-1252").decode(bytes);
+  }
+}
+
+// Descobre o separador do CSV. Não dá para confiar no palpite do SheetJS: extratos
+// começam com uma linha de título SEM separador, e ele chuta a partir da primeira
+// linha. Usamos a MEDIANA de separadores por linha (o título, sozinho, não
+// desequilibra) e só contamos fora das aspas, para não confundir a vírgula decimal
+// de "1.234,56" com separador de campo.
+function detectDelimiter(text: string): string {
+  const linhas = text.split(/\r?\n/).filter((l) => l.trim()).slice(0, 20);
+  if (!linhas.length) return ",";
+
+  const contarFora = (linha: string, sep: string) => {
+    let n = 0;
+    let aspas = false;
+    for (const c of linha) {
+      if (c === '"') aspas = !aspas;
+      else if (c === sep && !aspas) n++;
+    }
+    return n;
+  };
+
+  let melhor = ",";
+  let melhorMediana = 0;
+  for (const sep of [";", ",", "\t", "|"]) {
+    const cont = linhas.map((l) => contarFora(l, sep)).sort((a, b) => a - b);
+    const mediana = cont[Math.floor(cont.length / 2)] ?? 0;
+    if (mediana > melhorMediana) { melhorMediana = mediana; melhor = sep; }
+  }
+  return melhor;
+}
+
+async function readBankWorkbook(file: File, opts: { cellDates?: boolean } = {}) {
   const XLSX = await import("xlsx");
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: "array" });
+  const bytes = new Uint8Array(await file.arrayBuffer());
+
+  if (isBinaryWorkbook(bytes)) {
+    return { XLSX, wb: XLSX.read(bytes, { type: "array", ...opts }) };
+  }
+
+  // CSV: lido com raw:true, ou seja, TODA célula fica como texto.
+  //
+  // Sem isso o SheetJS infere tipos com convenção americana e corrompe o extrato em
+  // silêncio: "01/07/2026" (1º de julho) vira 7 de janeiro, e "1.234,56" vira
+  // 1.23456 — mil vezes menor. Como texto, quem interpreta é brDateToISO/coerceISO
+  // e parseBRNumber, que já entendem o formato brasileiro (é o mesmo caminho que os
+  // valores do .xls/.xlsx percorrem).
+  const text = decodeText(bytes);
+  const wb = XLSX.read(text, { type: "string", raw: true, FS: detectDelimiter(text), ...opts });
+  return { XLSX, wb };
+}
+
+export async function parseExcel(file: File): Promise<string> {
+  const { XLSX, wb } = await readBankWorkbook(file);
   const parts: string[] = [];
   for (const name of wb.SheetNames) {
     const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name], { FS: " | " });
@@ -92,13 +173,13 @@ function coerceSignedValue(fmtCell: unknown, rawCell: unknown): number | null {
   return negative ? -abs : abs;
 }
 
-// Extração ESTRUTURADA de extrato bancário em Excel (.xlsx OU .xls antigo —
-// SheetJS lê ambos). Detecta o banco pelo cabeçalho e delega:
+// Extração ESTRUTURADA de extrato bancário: .xlsx, .xls antigo ou .csv (ver
+// readBankWorkbook). A detecção do banco é a MESMA nos três formatos — depende só
+// do cabeçalho, não do container do arquivo:
 //   - coluna "Inf." (C/D)  => Banco do Brasil (tipo lido da coluna)
 //   - "Valor (R$)" sem C/D  => Sicredi (tipo pelo SINAL do valor)
 export async function parseBbEntries(file: File): Promise<ParsedEntry[]> {
-  const XLSX = await import("xlsx");
-  const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+  const { XLSX, wb } = await readBankWorkbook(file, { cellDates: true });
   const out: ParsedEntry[] = [];
 
   for (const sheetName of wb.SheetNames) {
