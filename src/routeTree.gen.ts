@@ -12,6 +12,8 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AuthUpdatePasswordRouteImport } from './routes/auth_.update-password'
+import { Route as AuthResetPasswordRouteImport } from './routes/auth_.reset-password'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
 import { Route as AuthenticatedConciliacaoRouteImport } from './routes/_authenticated/conciliacao'
 import { Route as AuthenticatedConciliacaoIndexRouteImport } from './routes/_authenticated/conciliacao.index'
@@ -36,6 +38,16 @@ const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthUpdatePasswordRoute = AuthUpdatePasswordRouteImport.update({
+  id: '/auth_/update-password',
+  path: '/auth/update-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthResetPasswordRoute = AuthResetPasswordRouteImport.update({
+  id: '/auth_/reset-password',
+  path: '/auth/reset-password',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedDashboardRoute = AuthenticatedDashboardRouteImport.update({
@@ -109,6 +121,8 @@ export interface FileRoutesByFullPath {
   '/auth': typeof AuthRoute
   '/conciliacao': typeof AuthenticatedConciliacaoRouteWithChildren
   '/dashboard': typeof AuthenticatedDashboardRoute
+  '/auth/reset-password': typeof AuthResetPasswordRoute
+  '/auth/update-password': typeof AuthUpdatePasswordRoute
   '/conciliacao/$id': typeof AuthenticatedConciliacaoIdRoute
   '/conciliacao/fila': typeof AuthenticatedConciliacaoFilaRoute
   '/conciliacao/massa': typeof AuthenticatedConciliacaoMassaRoute
@@ -123,6 +137,8 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
+  '/auth/reset-password': typeof AuthResetPasswordRoute
+  '/auth/update-password': typeof AuthUpdatePasswordRoute
   '/conciliacao/$id': typeof AuthenticatedConciliacaoIdRoute
   '/conciliacao/fila': typeof AuthenticatedConciliacaoFilaRoute
   '/conciliacao/massa': typeof AuthenticatedConciliacaoMassaRoute
@@ -140,6 +156,8 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/_authenticated/conciliacao': typeof AuthenticatedConciliacaoRouteWithChildren
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
+  '/auth_/reset-password': typeof AuthResetPasswordRoute
+  '/auth_/update-password': typeof AuthUpdatePasswordRoute
   '/_authenticated/conciliacao/$id': typeof AuthenticatedConciliacaoIdRoute
   '/_authenticated/conciliacao/fila': typeof AuthenticatedConciliacaoFilaRoute
   '/_authenticated/conciliacao/massa': typeof AuthenticatedConciliacaoMassaRoute
@@ -157,6 +175,8 @@ export interface FileRouteTypes {
     | '/auth'
     | '/conciliacao'
     | '/dashboard'
+    | '/auth/reset-password'
+    | '/auth/update-password'
     | '/conciliacao/$id'
     | '/conciliacao/fila'
     | '/conciliacao/massa'
@@ -171,6 +191,8 @@ export interface FileRouteTypes {
     | '/'
     | '/auth'
     | '/dashboard'
+    | '/auth/reset-password'
+    | '/auth/update-password'
     | '/conciliacao/$id'
     | '/conciliacao/fila'
     | '/conciliacao/massa'
@@ -187,6 +209,8 @@ export interface FileRouteTypes {
     | '/auth'
     | '/_authenticated/conciliacao'
     | '/_authenticated/dashboard'
+    | '/auth_/reset-password'
+    | '/auth_/update-password'
     | '/_authenticated/conciliacao/$id'
     | '/_authenticated/conciliacao/fila'
     | '/_authenticated/conciliacao/massa'
@@ -202,6 +226,8 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AuthRoute: typeof AuthRoute
+  AuthResetPasswordRoute: typeof AuthResetPasswordRoute
+  AuthUpdatePasswordRoute: typeof AuthUpdatePasswordRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -225,6 +251,20 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/auth_/update-password': {
+      id: '/auth_/update-password'
+      path: '/auth/update-password'
+      fullPath: '/auth/update-password'
+      preLoaderRoute: typeof AuthUpdatePasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/auth_/reset-password': {
+      id: '/auth_/reset-password'
+      path: '/auth/reset-password'
+      fullPath: '/auth/reset-password'
+      preLoaderRoute: typeof AuthResetPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated/dashboard': {
@@ -357,6 +397,8 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRoute,
+  AuthResetPasswordRoute: AuthResetPasswordRoute,
+  AuthUpdatePasswordRoute: AuthUpdatePasswordRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

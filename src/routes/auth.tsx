@@ -66,6 +66,9 @@ function LoginForm() {
       <div><Label>Email</Label><Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></div>
       <div><Label>Senha</Label><Input type="password" value={pw} onChange={(e) => setPw(e.target.value)} required /></div>
       <Button type="submit" className="w-full" disabled={busy}>{busy ? "Entrando…" : "Entrar"}</Button>
+      <p className="text-center text-xs text-muted-foreground">
+        <Link to="/auth/reset-password" className="hover:underline">Esqueci minha senha</Link>
+      </p>
     </form>
   );
 }
