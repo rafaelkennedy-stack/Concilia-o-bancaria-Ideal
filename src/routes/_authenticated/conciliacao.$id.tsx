@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { ArrowLeft, Check, Search, Lock, Unlock, X, AlertTriangle, Network, ClipboardList, Printer, Layers, Upload } from "lucide-react";
+import { ArrowLeft, Check, Search, Lock, Unlock, X, AlertTriangle, Network, ClipboardList, Printer, Layers, Upload, Trash2 } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useState } from "react";
@@ -23,7 +23,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   confirmMatch, manualMatch, justifyNoPair, closeReconciliation, reopenReconciliation,
   rejectSuggestion, confirmGroupedMatch, closeMassReconciliation, reopenWithNewFiles,
-  reassignAndConfirmMatch,
+  reassignAndConfirmMatch, deleteReconciliation,
 } from "@/lib/reconciliation.functions";
 import { parseExcel, parsePdf, extractBankBalance, extractAgrotisPrevious, parseBbEntries, parseAgrotisEntries } from "@/lib/file-extract";
 
@@ -64,6 +64,7 @@ function Detail() {
   const reassignConfirmFn = useServerFn(reassignAndConfirmMatch);
   const rejectFn = useServerFn(rejectSuggestion);
   const groupFn = useServerFn(confirmGroupedMatch);
+  const deleteFn = useServerFn(deleteReconciliation);
 
 
 
@@ -71,6 +72,7 @@ function Detail() {
 
   const [prevIdToReopen, setPrevIdToReopen] = useState<string | null>(null);
   const [closeError, setCloseError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   // Casamentos manuais propostos (cliente): pares {bbId, agId} ainda não
   // persistidos, exibidos no topo até o usuário clicar em Confirmar.
   const [proposedManual, setProposedManual] = useState<Array<{ bbId: string; agId: string }>>([]);
@@ -197,6 +199,20 @@ function Detail() {
       setPrevIdToReopen(null); setCloseError(null);
     } catch (e) { toast.error((e as Error).message); }
   }
+  async function doDelete() {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      await deleteFn({ data: { reconciliationId: id } });
+      toast.success("Conciliação excluída.");
+      navigate({ to: "/conciliacao" });
+      qc.removeQueries({ queryKey: ["reconciliation", id] });
+      qc.invalidateQueries({ queryKey: ["conciliacao-overview"] });
+    } catch (e) {
+      setDeleting(false);
+      toast.error("Não foi possível excluir", { description: (e as Error).message });
+    }
+  }
 
   return (
     <div className="container mx-auto max-w-6xl px-4 py-6">
@@ -289,6 +305,34 @@ function Detail() {
           )}
           {isClosed && isDiretor && (
             <ReopenDialog id={id} onReopened={() => qc.invalidateQueries({ queryKey: ["reconciliation", id] })} />
+          )}
+          {isDiretor && (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="destructive" disabled={deleting}>
+                  <Trash2 className="mr-1 h-4 w-4" /> Excluir conciliação
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Excluir conciliação?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Esta ação é permanente e não pode ser desfeita. Todos os lançamentos e
+                    casamentos serão removidos.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel disabled={deleting}>Cancelar</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={doDelete}
+                    disabled={deleting}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  >
+                    {deleting ? "Excluindo…" : "Excluir permanentemente"}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           )}
         </div>
       </div>

@@ -628,6 +628,55 @@ export const reopenReconciliation = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+// Exclusão PERMANENTE de uma conciliação e de tudo que pende dela. Apenas o Diretor.
+// Usa o cliente admin (service role) porque as políticas de RLS de `reconciliations`
+// e `reconciliation_audit_log` só concedem select/insert/update — um delete pelo
+// cliente autenticado não daria erro, apenas apagaria 0 linhas em silêncio.
+export const deleteReconciliation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ reconciliationId: z.string().uuid() }).parse(d))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { data: isDir } = await supabase.rpc("has_role", { _user_id: userId, _role: "diretor" });
+    if (!isDir) throw new Error("Apenas o Diretor pode excluir conciliações.");
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const id = data.reconciliationId;
+
+    const { data: rec, error: rErr } = await supabaseAdmin.from("reconciliations")
+      .select("id, reconciliation_date, account, status").eq("id", id).single();
+    if (rErr || !rec) throw new Error(rErr?.message || "Conciliação não encontrada");
+
+    // Registra a exclusão no log antes de apagar. A linha do audit_log é removida
+    // junto com a conciliação (o log é por conciliação), então o rastro que
+    // sobrevive é o do servidor.
+    await supabaseAdmin.from("reconciliation_audit_log").insert({
+      reconciliation_id: id, user_id: userId, action: "deleted",
+      details: { reconciliation_date: rec.reconciliation_date, account: rec.account, status: rec.status },
+    });
+    console.info("[conciliacao] exclusão permanente", {
+      reconciliationId: id, userId, date: rec.reconciliation_date, account: rec.account, status: rec.status,
+    });
+
+    // As três tabelas filhas têm `on delete cascade`, mas apagamos explicitamente
+    // (matches antes de entries, por causa das FKs de lançamento) para que uma
+    // falha apareça como erro em vez de deixar órfãos.
+    const { error: delMErr } = await supabaseAdmin.from("reconciliation_matches")
+      .delete().eq("reconciliation_id", id);
+    if (delMErr) throw new Error(delMErr.message);
+    const { error: delEErr } = await supabaseAdmin.from("reconciliation_entries")
+      .delete().eq("reconciliation_id", id);
+    if (delEErr) throw new Error(delEErr.message);
+    const { error: delLErr } = await supabaseAdmin.from("reconciliation_audit_log")
+      .delete().eq("reconciliation_id", id);
+    if (delLErr) throw new Error(delLErr.message);
+
+    const { error: delRErr } = await supabaseAdmin.from("reconciliations").delete().eq("id", id);
+    if (delRErr) throw new Error(delRErr.message);
+
+    return { ok: true };
+  });
+
 // Reabre uma conciliação SUBSTITUINDO seus lançamentos/casamentos pelos extraídos
 // de novos extratos. Apenas o Diretor pode executar. Ação destrutiva: apaga todos
 // os reconciliation_entries e reconciliation_matches antes de reprocessar.
@@ -1010,7 +1059,11 @@ export const closeMassReconciliation = createServerFn({ method: "POST" })
     }
 
     // Apaga a conciliação massa original (já sem lançamentos/casamentos).
-    const { error: delErr } = await supabase.from("reconciliations").delete().eq("id", rec.id);
+    // Precisa do cliente admin: `reconciliations` não tem policy de DELETE, então
+    // um delete pelo cliente autenticado apagaria 0 linhas SEM retornar erro e a
+    // massa ficaria órfã na lista. O audit_log dela sai por cascade.
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { error: delErr } = await supabaseAdmin.from("reconciliations").delete().eq("id", rec.id);
     if (delErr) throw new Error(delErr.message);
 
     return { ok: true, days, count: days.length };

@@ -157,9 +157,11 @@ function List() {
     const pending = entryIds.filter((id) => !resolved.has(id)).length;
     const confirmed = confirmedManual.size;
     const b = rec.balance_bank, c = rec.balance_agrotis_calculated;
+    // A divergência de saldo é informativa (cards de conta) e NÃO classifica a
+    // conciliação: a cor depende só do status e das pendências.
     const diverge = b != null && c != null && Math.abs(Number(b) - Number(c)) > TOLERANCE;
     let color: CellColor;
-    if (rec.status === "fechada") color = rec.closed_with_pending || diverge ? "amarelo" : "verde";
+    if (rec.status === "fechada") color = rec.closed_with_pending ? "amarelo" : "verde";
     else color = "aberta"; // aberta / reaberta / massa
     return { pending, confirmed, diverge, color };
   }
@@ -269,7 +271,7 @@ function List() {
         </h2>
         {attention.length === 0 ? (
           <Card className="p-6 text-center text-sm text-muted-foreground">
-            Tudo em dia — nenhuma conciliação aberta, pendente ou com divergência. Veja o histórico completo no calendário abaixo.
+            Tudo em dia — nenhuma conciliação aberta ou com pendências. Veja o histórico completo no calendário abaixo.
           </Card>
         ) : (
           <div className="space-y-2">
@@ -288,7 +290,7 @@ function List() {
                         <div><span className="font-medium text-emerald-600">{info.confirmed}</span> conciliados</div>
                         <div><span className="font-medium text-amber-600">{info.pending}</span> pendentes</div>
                       </div>
-                      <AttnBadge color={info.color} status={r.status} diverge={info.diverge} />
+                      <AttnBadge color={info.color} status={r.status} />
                     </div>
                   </div>
                 </Card>
@@ -400,12 +402,12 @@ function List() {
   );
 }
 
-function AttnBadge({ color, status, diverge }: { color: CellColor; status: string; diverge: boolean }) {
+function AttnBadge({ color, status }: { color: CellColor; status: string }) {
   const cls = color === "amarelo"
     ? "border-amber-300 bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
     : "border-red-300 bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300";
   const label = color === "amarelo"
-    ? (diverge ? "Divergência" : "Com pendências")
+    ? "Com pendências"
     : status === "massa" ? "Em massa" : status;
   return <Badge variant="outline" className={`${cls} capitalize`}>{label}</Badge>;
 }
