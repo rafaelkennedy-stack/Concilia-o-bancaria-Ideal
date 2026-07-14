@@ -110,7 +110,7 @@ function Mass() {
               )}
             </div>
             <FileField
-              label="Extrato BB (.xlsx)" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              label="Extrato BB (.xlsx ou .xls)" accept=".xlsx,.xls"
               file={bb} onChange={setBB}
             />
             <FileField
