@@ -21,6 +21,7 @@ import { Route as AuthenticatedConciliacaoNovaRouteImport } from './routes/_auth
 import { Route as AuthenticatedConciliacaoMassaRouteImport } from './routes/_authenticated/conciliacao.massa'
 import { Route as AuthenticatedConciliacaoFilaRouteImport } from './routes/_authenticated/conciliacao.fila'
 import { Route as AuthenticatedConciliacaoIdRouteImport } from './routes/_authenticated/conciliacao.$id'
+import { Route as AuthenticatedConciliacaoContaAccountIdRouteImport } from './routes/_authenticated/conciliacao.conta.$accountId'
 import { Route as AuthenticatedConciliacaoIdVinculosRouteImport } from './routes/_authenticated/conciliacao.$id_.vinculos'
 
 const AuthRoute = AuthRouteImport.update({
@@ -90,6 +91,12 @@ const AuthenticatedConciliacaoIdRoute =
     path: '/$id',
     getParentRoute: () => AuthenticatedConciliacaoRoute,
   } as any)
+const AuthenticatedConciliacaoContaAccountIdRoute =
+  AuthenticatedConciliacaoContaAccountIdRouteImport.update({
+    id: '/conta/$accountId',
+    path: '/conta/$accountId',
+    getParentRoute: () => AuthenticatedConciliacaoRoute,
+  } as any)
 const AuthenticatedConciliacaoIdVinculosRoute =
   AuthenticatedConciliacaoIdVinculosRouteImport.update({
     id: '/$id_/vinculos',
@@ -110,6 +117,7 @@ export interface FileRoutesByFullPath {
   '/configuracoes/usuarios': typeof AuthenticatedConfiguracoesUsuariosRoute
   '/conciliacao/': typeof AuthenticatedConciliacaoIndexRoute
   '/conciliacao/$id/vinculos': typeof AuthenticatedConciliacaoIdVinculosRoute
+  '/conciliacao/conta/$accountId': typeof AuthenticatedConciliacaoContaAccountIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -123,6 +131,7 @@ export interface FileRoutesByTo {
   '/configuracoes/usuarios': typeof AuthenticatedConfiguracoesUsuariosRoute
   '/conciliacao': typeof AuthenticatedConciliacaoIndexRoute
   '/conciliacao/$id/vinculos': typeof AuthenticatedConciliacaoIdVinculosRoute
+  '/conciliacao/conta/$accountId': typeof AuthenticatedConciliacaoContaAccountIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -139,6 +148,7 @@ export interface FileRoutesById {
   '/_authenticated/configuracoes/usuarios': typeof AuthenticatedConfiguracoesUsuariosRoute
   '/_authenticated/conciliacao/': typeof AuthenticatedConciliacaoIndexRoute
   '/_authenticated/conciliacao/$id_/vinculos': typeof AuthenticatedConciliacaoIdVinculosRoute
+  '/_authenticated/conciliacao/conta/$accountId': typeof AuthenticatedConciliacaoContaAccountIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -155,6 +165,7 @@ export interface FileRouteTypes {
     | '/configuracoes/usuarios'
     | '/conciliacao/'
     | '/conciliacao/$id/vinculos'
+    | '/conciliacao/conta/$accountId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -168,6 +179,7 @@ export interface FileRouteTypes {
     | '/configuracoes/usuarios'
     | '/conciliacao'
     | '/conciliacao/$id/vinculos'
+    | '/conciliacao/conta/$accountId'
   id:
     | '__root__'
     | '/'
@@ -183,6 +195,7 @@ export interface FileRouteTypes {
     | '/_authenticated/configuracoes/usuarios'
     | '/_authenticated/conciliacao/'
     | '/_authenticated/conciliacao/$id_/vinculos'
+    | '/_authenticated/conciliacao/conta/$accountId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -277,6 +290,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedConciliacaoIdRouteImport
       parentRoute: typeof AuthenticatedConciliacaoRoute
     }
+    '/_authenticated/conciliacao/conta/$accountId': {
+      id: '/_authenticated/conciliacao/conta/$accountId'
+      path: '/conta/$accountId'
+      fullPath: '/conciliacao/conta/$accountId'
+      preLoaderRoute: typeof AuthenticatedConciliacaoContaAccountIdRouteImport
+      parentRoute: typeof AuthenticatedConciliacaoRoute
+    }
     '/_authenticated/conciliacao/$id_/vinculos': {
       id: '/_authenticated/conciliacao/$id_/vinculos'
       path: '/$id/vinculos'
@@ -294,6 +314,7 @@ interface AuthenticatedConciliacaoRouteChildren {
   AuthenticatedConciliacaoNovaRoute: typeof AuthenticatedConciliacaoNovaRoute
   AuthenticatedConciliacaoIndexRoute: typeof AuthenticatedConciliacaoIndexRoute
   AuthenticatedConciliacaoIdVinculosRoute: typeof AuthenticatedConciliacaoIdVinculosRoute
+  AuthenticatedConciliacaoContaAccountIdRoute: typeof AuthenticatedConciliacaoContaAccountIdRoute
 }
 
 const AuthenticatedConciliacaoRouteChildren: AuthenticatedConciliacaoRouteChildren =
@@ -305,6 +326,8 @@ const AuthenticatedConciliacaoRouteChildren: AuthenticatedConciliacaoRouteChildr
     AuthenticatedConciliacaoIndexRoute: AuthenticatedConciliacaoIndexRoute,
     AuthenticatedConciliacaoIdVinculosRoute:
       AuthenticatedConciliacaoIdVinculosRoute,
+    AuthenticatedConciliacaoContaAccountIdRoute:
+      AuthenticatedConciliacaoContaAccountIdRoute,
   }
 
 const AuthenticatedConciliacaoRouteWithChildren =

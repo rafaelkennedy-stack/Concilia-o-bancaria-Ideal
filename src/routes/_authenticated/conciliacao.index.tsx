@@ -10,65 +10,26 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, Settings, ListChecks, LayoutDashboard, Users, Layers, CalendarDays, CircleAlert } from "lucide-react";
+import { Plus, Settings, ListChecks, LayoutDashboard, Users, Layers, CalendarDays, CircleAlert, ChevronRight } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { setNoMovement } from "@/lib/reconciliation.functions";
+import {
+  type CellColor, type Acct, type Rec, type Daily, type EntryRef, type MatchRef,
+  CELL_CLASS, CELL_LABEL, CELL_ORDER, CAL_BACK, CAL_FWD,
+  todayISO, isoShift, diffDays, isWeekend, acctLabel, fmtBRL,
+  buildCalendar, calendarDays, lastDays,
+} from "@/lib/reconciliation-calendar";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/")({
   component: List,
 });
 
-// ---- Datas em UTC, consistentes com toISOString().slice(0,10) do restante do app ----
-const todayISO = () => new Date().toISOString().slice(0, 10);
-function isoShift(baseISO: string, n: number): string {
-  const d = new Date(baseISO + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-}
-function diffDays(laterISO: string, earlierISO: string): number {
-  const a = new Date(laterISO + "T00:00:00Z").getTime();
-  const b = new Date(earlierISO + "T00:00:00Z").getTime();
-  return Math.round((a - b) / 86400000);
-}
-function isWeekend(iso: string): boolean {
-  const day = new Date(iso + "T00:00:00Z").getUTCDay();
-  return day === 0 || day === 6;
-}
-
-const CAL_BACK = 30;
-const CAL_FWD = 7;
 // Janela dos indicadores do card: 7 dias corridos (inclui o fim de semana, que
 // conta como "sem movimento" — igual ao calendário).
 const CARD_DAYS = 7;
 
-type Acct = { id: string; bank: string; entity_name: string; account_number: string | null };
-type Rec = {
-  id: string; reconciliation_date: string; account: string; bank_account_id: string | null;
-  status: "aberta" | "fechada" | "reaberta" | "massa";
-  balance_bank: number | null; balance_agrotis_calculated: number | null; closed_with_pending: boolean | null;
-};
-type Daily = { account_id: string; date: string; status: string; no_movement_reason: string | null };
 type LastClosed = { reconciliation_date: string; balance_bank: number | null; balance_agrotis_calculated: number | null; balance_agrotis_previous: number | null } | null;
-
-type CellColor = "verde" | "amarelo" | "aberta" | "semRegistro" | "cinza" | "futuro";
-
-const CELL_CLASS: Record<CellColor, string> = {
-  verde: "bg-emerald-500",
-  amarelo: "bg-amber-400",
-  aberta: "bg-red-800",
-  semRegistro: "bg-rose-400",
-  cinza: "bg-zinc-300 dark:bg-zinc-600",
-  futuro: "border border-dashed border-border bg-transparent",
-};
-const CELL_LABEL: Record<CellColor, string> = {
-  verde: "Conciliada",
-  amarelo: "Com pendências",
-  aberta: "Aberta",
-  semRegistro: "Sem registro (dia útil)",
-  cinza: "Sem movimento / fim de semana",
-  futuro: "Futuro",
-};
 
 // Indicadores do card, na ordem de exibição. As chaves são as MESMAS cores que o
 // calendário usa (CellColor), e a contagem vem de cellFor() — a mesma função que
@@ -80,10 +41,6 @@ const CARD_KINDS: Array<{ color: CellColor; one: string; many: string }> = [
   { color: "cinza", one: "sem movimento", many: "sem movimento" },
   { color: "semRegistro", one: "sem registro", many: "sem registro" },
 ];
-
-const acctLabel = (a: Acct) => `${a.bank} — ${a.entity_name}${a.account_number ? ` (${a.account_number})` : ""}`;
-const fmtBRL = (n: number | null | undefined) =>
-  n == null ? "—" : `R$ ${Number(n).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 function List() {
   const { isDiretor } = useAuth();
@@ -128,8 +85,8 @@ function List() {
       return {
         accts: (accts ?? []) as Acct[],
         recs: (recs ?? []) as Rec[],
-        entries: (entries ?? []) as { id: string; reconciliation_id: string }[],
-        matches: (matches ?? []) as { reconciliation_id: string; status: string; bb_entry_id: string | null; agrotis_entry_id: string | null }[],
+        entries: (entries ?? []) as EntryRef[],
+        matches: (matches ?? []) as MatchRef[],
         daily: (daily ?? []) as Daily[],
         lastClosed,
       };
@@ -138,71 +95,23 @@ function List() {
 
   const data = q.data;
 
-  // Índices e cálculos derivados (fora do render condicional para manter hooks estáveis).
-  const entriesByRec = new Map<string, string[]>();
-  const matchesByRec = new Map<string, { status: string; bb_entry_id: string | null; agrotis_entry_id: string | null }[]>();
-  const recByAcctDate = new Map<string, Rec[]>();
-  const dailyByKey = new Map<string, Daily>();
-  if (data) {
-    for (const e of data.entries) (entriesByRec.get(e.reconciliation_id) ?? entriesByRec.set(e.reconciliation_id, []).get(e.reconciliation_id)!).push(e.id);
-    for (const m of data.matches) (matchesByRec.get(m.reconciliation_id) ?? matchesByRec.set(m.reconciliation_id, []).get(m.reconciliation_id)!).push(m);
-    for (const r of data.recs) {
-      if (!r.bank_account_id) continue;
-      const k = `${r.bank_account_id}|${r.reconciliation_date}`;
-      (recByAcctDate.get(k) ?? recByAcctDate.set(k, []).get(k)!).push(r);
-    }
-    for (const d of data.daily) dailyByKey.set(`${d.account_id}|${d.date}`, d);
-  }
-
-  // pendentes = lançamentos sem match confirmed/manual/no_pair (não resolvidos); (bug 5b)
-  // conciliados = lançamentos em match confirmed/manual.
-  function recInfo(rec: Rec) {
-    const entryIds = entriesByRec.get(rec.id) ?? [];
-    const ms = matchesByRec.get(rec.id) ?? [];
-    const resolved = new Set<string>();
-    const confirmedManual = new Set<string>();
-    for (const m of ms) {
-      const isResolved = m.status === "confirmed" || m.status === "manual" || m.status === "no_pair";
-      const isConfirmed = m.status === "confirmed" || m.status === "manual";
-      if (isResolved) { if (m.bb_entry_id) resolved.add(m.bb_entry_id); if (m.agrotis_entry_id) resolved.add(m.agrotis_entry_id); }
-      if (isConfirmed) { if (m.bb_entry_id) confirmedManual.add(m.bb_entry_id); if (m.agrotis_entry_id) confirmedManual.add(m.agrotis_entry_id); }
-    }
-    const pending = entryIds.filter((id) => !resolved.has(id)).length;
-    const confirmed = confirmedManual.size;
-    // A divergência de saldo NÃO classifica a conciliação: a cor depende só do
-    // status e das pendências. O saldo aparece no card, como informação.
-    let color: CellColor;
-    if (rec.status === "fechada") color = rec.closed_with_pending ? "amarelo" : "verde";
-    else color = "aberta"; // aberta / reaberta / massa
-    return { pending, confirmed, color };
-  }
-
-  function cellFor(accountId: string, date: string): { color: CellColor; recId: string | null } {
-    const recs = recByAcctDate.get(`${accountId}|${date}`) ?? [];
-    const closed = recs.find((r) => r.status === "fechada");
-    if (closed) return { color: recInfo(closed).color, recId: closed.id };
-    const open = recs.find((r) => r.status === "aberta" || r.status === "reaberta" || r.status === "massa");
-    if (open) return { color: "aberta", recId: open.id };
-    const ds = dailyByKey.get(`${accountId}|${date}`);
-    if (ds?.status === "sem_movimento") return { color: "cinza", recId: null };
-    if (isWeekend(date)) return { color: "cinza", recId: null };
-    if (date > today) return { color: "futuro", recId: null };
-    return { color: "semRegistro", recId: null };
-  }
+  // Cores/pendências vêm do módulo compartilhado — a MESMA regra que a página da
+  // conta usa. (Fora do return condicional para manter os hooks estáveis.)
+  const { recInfo, cellFor } = buildCalendar(
+    data ?? { recs: [], entries: [], matches: [], daily: [] },
+    today,
+  );
 
   if (q.isLoading || !data) {
     return <div className="container mx-auto p-8 text-sm text-muted-foreground">Carregando…</div>;
   }
 
   const { accts, recs } = data;
-  const days: string[] = [];
-  for (let i = CAL_BACK; i >= 0; i--) days.push(isoShift(today, -i));
-  for (let i = 1; i <= CAL_FWD; i++) days.push(isoShift(today, i));
+  const days = calendarDays(today);
 
   // Últimos 7 dias corridos (até hoje) — subconjunto exato de `days`, então as
   // contagens do card são as mesmas células que o calendário desenha.
-  const cardDays: string[] = [];
-  for (let i = CARD_DAYS - 1; i >= 0; i--) cardDays.push(isoShift(today, -i));
+  const cardDays = lastDays(today, CARD_DAYS);
 
   // Conta, por conta bancária, quantos dos últimos 7 dias caem em cada cor —
   // usando cellFor(), a MESMA função que pinta o calendário.
@@ -266,9 +175,15 @@ function List() {
             const dias = lc ? diffDays(today, lc.reconciliation_date) : null;
             const tally = cardTally(a.id);
             return (
-              <Card key={a.id} className="p-4">
-                <div className="text-sm font-medium">{a.bank}</div>
-                <div className="truncate text-xs text-muted-foreground">{a.entity_name}{a.account_number ? ` · ${a.account_number}` : ""}</div>
+              <Link key={a.id} to="/conciliacao/conta/$accountId" params={{ accountId: a.id }} className="block">
+                <Card className="h-full p-4 transition-colors hover:bg-accent/40">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">{a.bank}</div>
+                    <div className="truncate text-xs text-muted-foreground">{a.entity_name}{a.account_number ? ` · ${a.account_number}` : ""}</div>
+                  </div>
+                  <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                </div>
                 {isDiretor && (
                   <div className="mt-2 text-xl font-semibold">{fmtBRL(saldo)}</div>
                 )}
@@ -288,7 +203,8 @@ function List() {
                   })}
                   <span className="ml-auto text-muted-foreground">7 dias</span>
                 </div>
-              </Card>
+                </Card>
+              </Link>
             );
           })}
         </div>
@@ -384,7 +300,7 @@ function List() {
 
         {/* Legenda */}
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          {(["verde", "amarelo", "aberta", "semRegistro", "cinza", "futuro"] as CellColor[]).map((c) => (
+          {CELL_ORDER.map((c) => (
             <span key={c} className="flex items-center gap-1.5">
               <span className={`h-3 w-3 rounded-sm ${CELL_CLASS[c]}`} />{CELL_LABEL[c]}
             </span>
