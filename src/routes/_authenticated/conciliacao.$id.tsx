@@ -25,7 +25,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   confirmMatch, manualMatch, justifyNoPair, closeReconciliation, reopenReconciliation,
   rejectSuggestion, confirmGroupedMatch, closeMassReconciliation, reopenWithNewFiles,
-  reassignAndConfirmMatch, deleteReconciliation,
+  reassignAndConfirmMatch, deleteReconciliation, deleteEntry,
 } from "@/lib/reconciliation.functions";
 import type { ReopenSide } from "@/lib/reconciliation.functions";
 import { parseExcel, parsePdf, extractBankBalance, extractAgrotisPrevious, parseBbEntries, parseAgrotisEntries } from "@/lib/file-extract";
@@ -68,6 +68,7 @@ function Detail() {
   const rejectFn = useServerFn(rejectSuggestion);
   const groupFn = useServerFn(confirmGroupedMatch);
   const deleteFn = useServerFn(deleteReconciliation);
+  const deleteEntryFn = useServerFn(deleteEntry);
 
 
 
@@ -469,6 +470,17 @@ function Detail() {
                     toast.success("Marcado sem par"); qc.invalidateQueries({ queryKey: ["reconciliation", id] }); }
                   catch (err) { toast.error((err as Error).message); }
                 }}
+                canDelete={isDiretor}
+                onDelete={async (justification) => {
+                  try {
+                    await deleteEntryFn({ data: { reconciliationId: id, entryId: e.id, justification } });
+                    toast.success("Lançamento excluído.");
+                    qc.invalidateQueries({ queryKey: ["reconciliation", id] });
+                    qc.invalidateQueries({ queryKey: ["conciliacao-overview"] });
+                  } catch (err) {
+                    toast.error("Não foi possível excluir", { description: (err as Error).message });
+                  }
+                }}
                 disabled={isClosed}
               />
             ))}
@@ -593,14 +605,18 @@ function ProposedManualRow({ bb, ag, onConfirm, onCancel, disabled }: {
   );
 }
 
-function PendingRow({ entry, allEntries, excludeIds, onPropose, onNoPair, disabled }: {
+function PendingRow({ entry, allEntries, excludeIds, onPropose, onNoPair, canDelete, onDelete, disabled }: {
   entry: Entry; allEntries: Entry[]; excludeIds: Set<string>;
-  onPropose: (otherId: string) => void; onNoPair: (j: string) => void; disabled: boolean;
+  onPropose: (otherId: string) => void; onNoPair: (j: string) => void;
+  canDelete: boolean; onDelete: (j: string) => void | Promise<void>; disabled: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [noOpen, setNoOpen] = useState(false);
+  const [delOpen, setDelOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [justification, setJustification] = useState("");
+  const [delJustification, setDelJustification] = useState("");
+  const [deleting, setDeleting] = useState(false);
   // Candidatos do lado oposto que não estão presos a nenhum vínculo ativo nem a
   // uma proposta de casamento manual ainda não confirmada (excludeIds).
   const opposite = allEntries.filter((e) => e.source !== entry.source && !excludeIds.has(e.id));
@@ -658,6 +674,56 @@ function PendingRow({ entry, allEntries, excludeIds, onPropose, onNoPair, disabl
               </DialogFooter>
             </DialogContent>
           </Dialog>
+
+          {canDelete && (
+            <Dialog open={delOpen} onOpenChange={(o) => { if (!deleting) { setDelOpen(o); if (!o) setDelJustification(""); } }}>
+              <DialogTrigger asChild>
+                <Button
+                  size="sm" variant="ghost" title="Excluir lançamento"
+                  className="text-rose-600 hover:bg-rose-100 hover:text-rose-700 dark:hover:bg-rose-950/40"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  <span className="sr-only">Excluir lançamento</span>
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader><DialogTitle>Excluir lançamento?</DialogTitle></DialogHeader>
+                <p className="text-sm text-muted-foreground">
+                  O lançamento é removido em definitivo da conciliação. A exclusão e a
+                  justificativa ficam registradas no histórico.
+                </p>
+                <EntryCard e={entry} label={entry.source === "bb" ? "Banco do Brasil" : "Agrotis"} />
+                <div>
+                  <div className="mb-1 text-xs font-medium">Justificativa (obrigatória)</div>
+                  <Textarea
+                    value={delJustification}
+                    onChange={(e) => setDelJustification(e.target.value)}
+                    placeholder="Explique por que este lançamento deve ser excluído…"
+                    disabled={deleting}
+                  />
+                </div>
+                <DialogFooter>
+                  <Button variant="ghost" onClick={() => setDelOpen(false)} disabled={deleting}>Cancelar</Button>
+                  <Button
+                    variant="destructive"
+                    disabled={deleting || !delJustification.trim()}
+                    onClick={async () => {
+                      setDeleting(true);
+                      try {
+                        await onDelete(delJustification.trim());
+                        setDelOpen(false);
+                        setDelJustification("");
+                      } finally {
+                        setDeleting(false);
+                      }
+                    }}
+                  >
+                    {deleting ? "Excluindo…" : <><Trash2 className="mr-1 h-4 w-4" /> Excluir lançamento</>}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          )}
         </div>
       )}
     </Card>

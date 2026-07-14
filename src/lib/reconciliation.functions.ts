@@ -677,6 +677,76 @@ export const deleteReconciliation = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+// Exclui UM lançamento da conciliação, com justificativa obrigatória. Apenas o
+// Diretor. Serve para tirar lixo de extrato (linha duplicada, cabeçalho lido como
+// lançamento) que trava o fechamento.
+//
+// Usa o cliente admin por consistência com deleteReconciliation e para não depender
+// de policy. (Nota: aqui o cliente autenticado TAMBÉM funcionaria —
+// reconciliation_entries/matches têm policy "for all to authenticated", que no
+// Postgres inclui DELETE. Quem não tem policy de DELETE é reconciliations e
+// reconciliation_audit_log.)
+export const deleteEntry = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({
+    reconciliationId: z.string().uuid(),
+    entryId: z.string().uuid(),
+    justification: z.string().trim().min(1),
+  }).parse(d))
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { data: isDir } = await supabase.rpc("has_role", { _user_id: userId, _role: "diretor" });
+    if (!isDir) throw new Error("Apenas o Diretor pode excluir lançamentos.");
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: entry, error: eErr } = await supabaseAdmin.from("reconciliation_entries")
+      .select("id, reconciliation_id, source, entry_date, description, beneficiary, amount, entry_type, document_ref")
+      .eq("id", data.entryId).single();
+    if (eErr || !entry) throw new Error(eErr?.message || "Lançamento não encontrado");
+    // O id da conciliação vem do cliente: confere que o lançamento é mesmo dela,
+    // senão um id de outra conciliação apagaria um lançamento alheio.
+    if (entry.reconciliation_id !== data.reconciliationId) {
+      throw new Error("O lançamento não pertence a esta conciliação.");
+    }
+
+    // Casamentos que citam o lançamento de qualquer lado (inclui os no_pair, de lado
+    // único). O cascade da FK já os removeria, mas precisamos deles para o log.
+    const { data: matches, error: mErr } = await supabaseAdmin.from("reconciliation_matches")
+      .select("id, status")
+      .eq("reconciliation_id", entry.reconciliation_id)
+      .or(`bb_entry_id.eq.${data.entryId},agrotis_entry_id.eq.${data.entryId}`);
+    if (mErr) throw new Error(mErr.message);
+
+    // Log ANTES de apagar. Diferente de deleteReconciliation, este registro
+    // SOBREVIVE: só a conciliação inteira sendo excluída levaria o audit_log junto.
+    const { error: logErr } = await supabaseAdmin.from("reconciliation_audit_log").insert({
+      reconciliation_id: entry.reconciliation_id, user_id: userId, action: "entry_deleted",
+      details: {
+        justification: data.justification,
+        entry: {
+          id: entry.id, source: entry.source, entry_date: entry.entry_date,
+          description: entry.description, beneficiary: entry.beneficiary,
+          amount: entry.amount, entry_type: entry.entry_type, document_ref: entry.document_ref,
+        },
+        matches_removed: (matches ?? []).length,
+      },
+    });
+    if (logErr) throw new Error(logErr.message);
+
+    if (matches?.length) {
+      const { error } = await supabaseAdmin.from("reconciliation_matches")
+        .delete().in("id", matches.map((m) => m.id));
+      if (error) throw new Error(error.message);
+    }
+
+    const { error: delErr } = await supabaseAdmin.from("reconciliation_entries")
+      .delete().eq("id", data.entryId);
+    if (delErr) throw new Error(delErr.message);
+
+    return { ok: true, matchesRemoved: (matches ?? []).length };
+  });
+
 // Reabre uma conciliação SUBSTITUINDO os lançamentos/casamentos de UM lado
 // ("bb" ou "agrotis") ou dos dois ("both"). Apenas o Diretor pode executar.
 //
