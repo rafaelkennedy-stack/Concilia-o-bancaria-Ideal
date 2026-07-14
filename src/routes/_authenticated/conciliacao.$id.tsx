@@ -28,7 +28,7 @@ import {
   reassignAndConfirmMatch, deleteReconciliation, deleteEntry,
 } from "@/lib/reconciliation.functions";
 import type { ReopenSide } from "@/lib/reconciliation.functions";
-import { parseExcel, parsePdf, extractBankBalance, extractAgrotisPrevious, parseBbEntries, parseAgrotisEntries } from "@/lib/file-extract";
+import { parsePdf, extractBankBalanceFromFile, extractAgrotisPrevious, parseBbEntries, parseAgrotisEntries } from "@/lib/file-extract";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/$id")({
   component: Detail,
@@ -1078,7 +1078,7 @@ function ReopenFileField({ label, accept, file, onChange, disabled }: {
 // Somente Diretor (renderizado apenas nesse caso); a validação de papel também é
 // feita no servidor (reopenWithNewFiles).
 const REOPEN_SIDES: Array<{ value: ReopenSide; label: string; hint: string }> = [
-  { value: "bb", label: "Alterar extrato do banco", hint: "Sobe um novo Excel do BB (.xlsx, .xls ou .csv). Os lançamentos do Agrotis são mantidos." },
+  { value: "bb", label: "Alterar extrato do banco", hint: "Sobe um novo extrato do banco (.ofx recomendado, .xlsx ou .xls). Os lançamentos do Agrotis são mantidos." },
   { value: "agrotis", label: "Alterar extrato do Agrotis", hint: "Sobe um novo .pdf do Agrotis. Os lançamentos do BB são mantidos." },
   { value: "both", label: "Alterar os dois extratos", hint: "Substitui os lançamentos dos dois lados." },
 ];
@@ -1106,9 +1106,11 @@ function ReopenDialog({ id, onReopened }: { id: string; onReopened: () => void }
       // Lê só o(s) lado(s) que serão trocados.
       let bbPayload: { bbFileName: string; bbEntries: Awaited<ReturnType<typeof parseBbEntries>>; balanceBank: number | null } | null = null;
       if (needBb && bb) {
-        const [bbEntries, bbText] = await Promise.all([parseBbEntries(bb), parseExcel(bb)]);
-        if (!bbEntries.length) throw new Error("Nenhum lançamento lido do Excel do BB.");
-        bbPayload = { bbFileName: bb.name, bbEntries, balanceBank: extractBankBalance(bbText) };
+        const [bbEntries, balanceBank] = await Promise.all([
+          parseBbEntries(bb), extractBankBalanceFromFile(bb),
+        ]);
+        if (!bbEntries.length) throw new Error("Nenhum lançamento lido do extrato do banco.");
+        bbPayload = { bbFileName: bb.name, bbEntries, balanceBank };
       }
 
       let agPayload: { agrotisFileName: string; agrotisEntries: Awaited<ReturnType<typeof parseAgrotisEntries>>; balanceAgrotisPrevious: number | null } | null = null;
@@ -1181,8 +1183,8 @@ function ReopenDialog({ id, onReopened }: { id: string; onReopened: () => void }
 
         {needBb && (
           <ReopenFileField
-            label="Novo extrato BB (.xlsx, .xls ou .csv)"
-            accept=".xlsx,.xls,.csv"
+            label="Novo extrato do banco (.ofx recomendado, .xlsx ou .xls)"
+            accept=".ofx,.xlsx,.xls"
             file={bb} onChange={setBb} disabled={busy}
           />
         )}

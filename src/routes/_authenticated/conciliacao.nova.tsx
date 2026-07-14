@@ -14,8 +14,8 @@ import {
 import { ArrowLeft, Upload, Sparkles } from "lucide-react";
 import { processReconciliation } from "@/lib/reconciliation.functions";
 import {
-  parseBbEntries, parseAgrotisEntries, parseExcel, parsePdf,
-  extractBankBalance, extractAgrotisPrevious,
+  parseBbEntries, parseAgrotisEntries, parsePdf,
+  extractBankBalanceFromFile, extractAgrotisPrevious,
 } from "@/lib/file-extract";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/nova")({
@@ -61,12 +61,11 @@ function New() {
       toast.info("Lendo arquivos…");
       // Lançamentos extraídos deterministicamente (tipo C/D e valor lidos das
       // colunas). O texto bruto é usado só para os saldos.
-      const [bbEntries, agrotisEntries, bbText, agrotisText] = await Promise.all([
-        parseBbEntries(bb), parseAgrotisEntries(ag), parseExcel(bb), parsePdf(ag),
+      const [bbEntries, agrotisEntries, balanceBank, agrotisText] = await Promise.all([
+        parseBbEntries(bb), parseAgrotisEntries(ag), extractBankBalanceFromFile(bb), parsePdf(ag),
       ]);
-      if (!bbEntries.length) throw new Error("Nenhum lançamento lido do Excel do BB.");
+      if (!bbEntries.length) throw new Error("Nenhum lançamento lido do extrato do banco.");
       if (!agrotisEntries.length) throw new Error("Nenhum lançamento lido do PDF do Agrotis.");
-      const balanceBank = extractBankBalance(bbText);
       const balanceAgrotisPrevious = extractAgrotisPrevious(agrotisText);
       if (balanceBank == null) toast.warning("Saldo do banco não encontrado — o fechamento poderá pedir revisão.");
       if (balanceAgrotisPrevious == null) toast.warning("Saldo anterior Agrotis não encontrado — validação da cadeia ficará indisponível.");
@@ -127,7 +126,7 @@ function New() {
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
             </div>
             <FileField
-              label="Extrato BB (.xlsx, .xls ou .csv)" accept=".xlsx,.xls,.csv"
+              label="Extrato do banco (.ofx recomendado, .xlsx ou .xls)" accept=".ofx,.xlsx,.xls"
               file={bb} onChange={setBB}
             />
             <FileField

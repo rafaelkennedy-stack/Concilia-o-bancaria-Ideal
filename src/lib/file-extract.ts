@@ -36,6 +36,74 @@ function decodeText(bytes: Uint8Array): string {
   }
 }
 
+// ---- OFX ----------------------------------------------------------------------
+//
+// OFX é o formato mais confiável dos três: o tipo do lançamento vem do SINAL de
+// <TRNAMT> (não depende de existir uma coluna "Inf."), a data é ISO (AAAAMMDD) e
+// não há ambiguidade de separador nem de casa decimal — as armadilhas que o CSV tem.
+//
+// ATENÇÃO ao roteamento: OFX é TEXTO, e readBankWorkbook trata todo arquivo não
+// binário como CSV. Por isso a detecção de OFX precisa vir ANTES — senão o arquivo
+// entra no parser de CSV e vira lixo silencioso.
+function isOfx(text: string): boolean {
+  const inicio = text.slice(0, 2048).toUpperCase();
+  return inicio.includes("OFXHEADER") || inicio.includes("<OFX>");
+}
+
+// Valor de um elemento folha do OFX. No OFX clássico (SGML) as folhas NÃO são
+// fechadas — "<TRNAMT>-100.00\n<MEMO>..." — então o valor vai até o próximo "<" ou
+// quebra de linha. Isso também funciona no OFX 2.x (XML), onde a tag é fechada.
+function ofxTag(bloco: string, nome: string): string | null {
+  const m = bloco.match(new RegExp(`<${nome}>([^<\r\n]*)`, "i"));
+  return m ? (m[1].trim() || null) : null;
+}
+
+// OFX especifica ponto como separador decimal, mas alguns bancos brasileiros emitem
+// vírgula. Cobrimos os dois — sem passar por parseBRNumber, que trataria o ponto de
+// "1234.56" como separador de milhar.
+function ofxAmount(raw: string | null): number | null {
+  if (!raw) return null;
+  const s = raw.replace(/\s/g, "");
+  if (!s) return null;
+  const n = Number(s.includes(",") ? s.replace(/\./g, "").replace(",", ".") : s);
+  return Number.isFinite(n) ? n : null;
+}
+
+// <DTPOSTED>20260701120000[-3:BRT] -> "2026-07-01" (os 8 primeiros dígitos).
+function ofxDate(raw: string | null): string | null {
+  if (!raw) return null;
+  const m = raw.match(/(\d{4})(\d{2})(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+function parseOfxEntries(text: string): ParsedEntry[] {
+  const out: ParsedEntry[] = [];
+  for (const m of text.matchAll(/<STMTTRN>([\s\S]*?)<\/STMTTRN>/gi)) {
+    const bloco = m[1];
+    const entry_date = ofxDate(ofxTag(bloco, "DTPOSTED"));
+    const valor = ofxAmount(ofxTag(bloco, "TRNAMT"));
+    if (!entry_date || valor == null) continue;
+    out.push({
+      entry_date,
+      description: ofxTag(bloco, "MEMO") ?? "",
+      beneficiary: null,
+      amount: Math.abs(valor),
+      entry_type: valor < 0 ? "D" : "C",   // sinal do TRNAMT define o tipo
+      document_ref: ofxTag(bloco, "CHECKNUM"),
+    });
+  }
+  return out;
+}
+
+// Saldo final do extrato: <LEDGERBAL> ... <BALAMT>. É preciso limitar a busca ao
+// bloco LEDGERBAL — o OFX também tem <AVAILBAL><BALAMT> (saldo disponível), que é
+// outro número e não deve ser confundido com o saldo do razão.
+function parseOfxBalance(text: string): number | null {
+  const bloco = text.match(/<LEDGERBAL>([\s\S]*?)<\/LEDGERBAL>/i);
+  if (!bloco) return null;
+  return ofxAmount(ofxTag(bloco[1], "BALAMT"));
+}
+
 // Descobre o separador do CSV. Não dá para confiar no palpite do SheetJS: extratos
 // começam com uma linha de título SEM separador, e ele chuta a partir da primeira
 // linha. Usamos a MEDIANA de separadores por linha (o título, sozinho, não
@@ -179,6 +247,14 @@ function coerceSignedValue(fmtCell: unknown, rawCell: unknown): number | null {
 //   - coluna "Inf." (C/D)  => Banco do Brasil (tipo lido da coluna)
 //   - "Valor (R$)" sem C/D  => Sicredi (tipo pelo SINAL do valor)
 export async function parseBbEntries(file: File): Promise<ParsedEntry[]> {
+  // OFX é texto: precisa ser desviado ANTES de readBankWorkbook, que trataria o
+  // arquivo como CSV.
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!isBinaryWorkbook(bytes)) {
+    const text = decodeText(bytes);
+    if (isOfx(text)) return parseOfxEntries(text);
+  }
+
   const { XLSX, wb } = await readBankWorkbook(file, { cellDates: true });
   const out: ParsedEntry[] = [];
 
@@ -279,6 +355,19 @@ function parseSicrediSheet(
     });
   }
   return out;
+}
+
+// Saldo do extrato bancário, seja qual for o formato. As telas chamam SÓ isto e não
+// precisam saber com que arquivo estão lidando:
+//   - OFX  => <LEDGERBAL><BALAMT> (número explícito, sem heurística)
+//   - .xlsx/.xls/.csv => procura a linha "SALDO" no texto achatado
+export async function extractBankBalanceFromFile(file: File): Promise<number | null> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!isBinaryWorkbook(bytes)) {
+    const text = decodeText(bytes);
+    if (isOfx(text)) return parseOfxBalance(text);
+  }
+  return extractBankBalance(await parseExcel(file));
 }
 
 // Extração ESTRUTURADA do PDF do Agrotis usando POSIÇÃO (coordenada x) dos
