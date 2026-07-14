@@ -9,6 +9,8 @@ import { Card } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
@@ -25,6 +27,7 @@ import {
   rejectSuggestion, confirmGroupedMatch, closeMassReconciliation, reopenWithNewFiles,
   reassignAndConfirmMatch, deleteReconciliation,
 } from "@/lib/reconciliation.functions";
+import type { ReopenSide } from "@/lib/reconciliation.functions";
 import { parseExcel, parsePdf, extractBankBalance, extractAgrotisPrevious, parseBbEntries, parseAgrotisEntries } from "@/lib/file-extract";
 
 export const Route = createFileRoute("/_authenticated/conciliacao/$id")({
@@ -1008,34 +1011,59 @@ function ReopenFileField({ label, accept, file, onChange, disabled }: {
 // Reabrir substituindo os lançamentos/casamentos pelos de novos extratos.
 // Somente Diretor (renderizado apenas nesse caso); a validação de papel também é
 // feita no servidor (reopenWithNewFiles).
+const REOPEN_SIDES: Array<{ value: ReopenSide; label: string; hint: string }> = [
+  { value: "bb", label: "Alterar extrato do banco", hint: "Sobe um novo .xlsx do BB. Os lançamentos do Agrotis são mantidos." },
+  { value: "agrotis", label: "Alterar extrato do Agrotis", hint: "Sobe um novo .pdf do Agrotis. Os lançamentos do BB são mantidos." },
+  { value: "both", label: "Alterar os dois extratos", hint: "Substitui os lançamentos dos dois lados." },
+];
+
 function ReopenDialog({ id, onReopened }: { id: string; onReopened: () => void }) {
   const reopenFilesFn = useServerFn(reopenWithNewFiles);
   const [open, setOpen] = useState(false);
+  const [side, setSide] = useState<ReopenSide>("both");
   const [bb, setBb] = useState<File | null>(null);
   const [ag, setAg] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const needBb = side === "bb" || side === "both";
+  const needAg = side === "agrotis" || side === "both";
+  const ready = (!needBb || !!bb) && (!needAg || !!ag);
+
+  function reset() { setSide("both"); setBb(null); setAg(null); }
+
   async function submit() {
-    if (!bb || !ag) { toast.error("Envie os dois arquivos."); return; }
+    if (!ready) { toast.error("Envie o arquivo do lado que será alterado."); return; }
     setBusy(true);
     try {
       toast.info("Lendo arquivos…");
-      const [bbEntries, agrotisEntries, bbText, agrotisText] = await Promise.all([
-        parseBbEntries(bb), parseAgrotisEntries(ag), parseExcel(bb), parsePdf(ag),
-      ]);
-      if (!bbEntries.length) throw new Error("Nenhum lançamento lido do Excel do BB.");
-      if (!agrotisEntries.length) throw new Error("Nenhum lançamento lido do PDF do Agrotis.");
-      const balanceBank = extractBankBalance(bbText);
-      const balanceAgrotisPrevious = extractAgrotisPrevious(agrotisText);
+
+      // Lê só o(s) lado(s) que serão trocados.
+      let bbPayload: { bbFileName: string; bbEntries: Awaited<ReturnType<typeof parseBbEntries>>; balanceBank: number | null } | null = null;
+      if (needBb && bb) {
+        const [bbEntries, bbText] = await Promise.all([parseBbEntries(bb), parseExcel(bb)]);
+        if (!bbEntries.length) throw new Error("Nenhum lançamento lido do Excel do BB.");
+        bbPayload = { bbFileName: bb.name, bbEntries, balanceBank: extractBankBalance(bbText) };
+      }
+
+      let agPayload: { agrotisFileName: string; agrotisEntries: Awaited<ReturnType<typeof parseAgrotisEntries>>; balanceAgrotisPrevious: number | null } | null = null;
+      if (needAg && ag) {
+        const [agrotisEntries, agrotisText] = await Promise.all([parseAgrotisEntries(ag), parsePdf(ag)]);
+        if (!agrotisEntries.length) throw new Error("Nenhum lançamento lido do PDF do Agrotis.");
+        agPayload = { agrotisFileName: ag.name, agrotisEntries, balanceAgrotisPrevious: extractAgrotisPrevious(agrotisText) };
+      }
+
       toast.info("Reprocessando com IA…", { description: "Isso pode levar alguns segundos." });
-      await reopenFilesFn({ data: {
-        reconciliationId: id,
-        bbFileName: bb.name, bbEntries,
-        agrotisFileName: ag.name, agrotisEntries,
-        balanceBank, balanceAgrotisPrevious,
-      }});
+
+      if (side === "bb") {
+        await reopenFilesFn({ data: { side: "bb", reconciliationId: id, ...bbPayload! } });
+      } else if (side === "agrotis") {
+        await reopenFilesFn({ data: { side: "agrotis", reconciliationId: id, ...agPayload! } });
+      } else {
+        await reopenFilesFn({ data: { side: "both", reconciliationId: id, ...bbPayload!, ...agPayload! } });
+      }
+
       toast.success("Conciliação reaberta e reprocessada.");
-      setOpen(false); setBb(null); setAg(null);
+      setOpen(false); reset();
       onReopened();
     } catch (e) {
       toast.error("Falha ao reabrir", { description: (e as Error).message });
@@ -1045,7 +1073,7 @@ function ReopenDialog({ id, onReopened }: { id: string; onReopened: () => void }
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!busy) setOpen(o); }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!busy) { setOpen(o); if (!o) reset(); } }}>
       <DialogTrigger asChild>
         <Button variant="outline"><Unlock className="mr-1 h-4 w-4" /> Reabrir</Button>
       </DialogTrigger>
@@ -1053,22 +1081,56 @@ function ReopenDialog({ id, onReopened }: { id: string; onReopened: () => void }
         <DialogHeader>
           <DialogTitle>Reabrir e reprocessar</DialogTitle>
         </DialogHeader>
+
+        <RadioGroup
+          value={side}
+          onValueChange={(v) => { setSide(v as ReopenSide); setBb(null); setAg(null); }}
+          disabled={busy}
+          className="gap-2"
+        >
+          {REOPEN_SIDES.map((o) => (
+            <Label
+              key={o.value}
+              htmlFor={`reopen-${o.value}`}
+              className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 ${
+                side === o.value ? "border-primary bg-accent/40" : "hover:bg-accent/20"
+              }`}
+            >
+              <RadioGroupItem value={o.value} id={`reopen-${o.value}`} className="mt-0.5" />
+              <div className="space-y-0.5">
+                <div className="text-sm font-medium leading-none">{o.label}</div>
+                <div className="text-xs font-normal text-muted-foreground">{o.hint}</div>
+              </div>
+            </Label>
+          ))}
+        </RadioGroup>
+
         <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/20 dark:text-amber-200">
-          Ao reabrir, todos os lançamentos e casamentos serão substituídos. Esta ação não pode ser desfeita.
+          {side === "both"
+            ? "Todos os lançamentos e casamentos serão substituídos."
+            : `Os lançamentos do ${side === "bb" ? "Banco do Brasil" : "Agrotis"} serão substituídos; ` +
+              `os do ${side === "bb" ? "Agrotis" : "Banco do Brasil"} são mantidos.`}
+          {" "}Em todos os casos os casamentos são refeitos do zero. Esta ação não pode ser desfeita.
         </div>
-        <ReopenFileField
-          label="Novo extrato BB (.xlsx)"
-          accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          file={bb} onChange={setBb} disabled={busy}
-        />
-        <ReopenFileField
-          label="Novo extrato Agrotis (.pdf)"
-          accept=".pdf,application/pdf"
-          file={ag} onChange={setAg} disabled={busy}
-        />
+
+        {needBb && (
+          <ReopenFileField
+            label="Novo extrato BB (.xlsx)"
+            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            file={bb} onChange={setBb} disabled={busy}
+          />
+        )}
+        {needAg && (
+          <ReopenFileField
+            label="Novo extrato Agrotis (.pdf)"
+            accept=".pdf,application/pdf"
+            file={ag} onChange={setAg} disabled={busy}
+          />
+        )}
+
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>Cancelar</Button>
-          <Button onClick={submit} disabled={busy || !bb || !ag}>
+          <Button onClick={submit} disabled={busy || !ready}>
             {busy ? "Reprocessando…" : <><Unlock className="mr-1 h-4 w-4" /> Reabrir e reprocessar</>}
           </Button>
         </DialogFooter>

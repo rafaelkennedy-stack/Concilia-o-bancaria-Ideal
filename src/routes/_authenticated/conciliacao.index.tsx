@@ -38,7 +38,9 @@ function isWeekend(iso: string): boolean {
 
 const CAL_BACK = 30;
 const CAL_FWD = 7;
-const TOLERANCE = 1.0;
+// Janela dos indicadores do card: 7 dias corridos (inclui o fim de semana, que
+// conta como "sem movimento" — igual ao calendário).
+const CARD_DAYS = 7;
 
 type Acct = { id: string; bank: string; entity_name: string; account_number: string | null };
 type Rec = {
@@ -61,12 +63,23 @@ const CELL_CLASS: Record<CellColor, string> = {
 };
 const CELL_LABEL: Record<CellColor, string> = {
   verde: "Conciliada",
-  amarelo: "Pendência ou divergência",
+  amarelo: "Com pendências",
   aberta: "Aberta",
   semRegistro: "Sem registro (dia útil)",
   cinza: "Sem movimento / fim de semana",
   futuro: "Futuro",
 };
+
+// Indicadores do card, na ordem de exibição. As chaves são as MESMAS cores que o
+// calendário usa (CellColor), e a contagem vem de cellFor() — a mesma função que
+// pinta as células. Card e calendário não têm como divergir.
+const CARD_KINDS: Array<{ color: CellColor; one: string; many: string }> = [
+  { color: "verde", one: "conciliada", many: "conciliadas" },
+  { color: "amarelo", one: "com pendências", many: "com pendências" },
+  { color: "aberta", one: "aberta", many: "abertas" },
+  { color: "cinza", one: "sem movimento", many: "sem movimento" },
+  { color: "semRegistro", one: "sem registro", many: "sem registro" },
+];
 
 const acctLabel = (a: Acct) => `${a.bank} — ${a.entity_name}${a.account_number ? ` (${a.account_number})` : ""}`;
 const fmtBRL = (n: number | null | undefined) =>
@@ -156,14 +169,12 @@ function List() {
     }
     const pending = entryIds.filter((id) => !resolved.has(id)).length;
     const confirmed = confirmedManual.size;
-    const b = rec.balance_bank, c = rec.balance_agrotis_calculated;
-    // A divergência de saldo é informativa (cards de conta) e NÃO classifica a
-    // conciliação: a cor depende só do status e das pendências.
-    const diverge = b != null && c != null && Math.abs(Number(b) - Number(c)) > TOLERANCE;
+    // A divergência de saldo NÃO classifica a conciliação: a cor depende só do
+    // status e das pendências. O saldo aparece no card, como informação.
     let color: CellColor;
     if (rec.status === "fechada") color = rec.closed_with_pending ? "amarelo" : "verde";
     else color = "aberta"; // aberta / reaberta / massa
-    return { pending, confirmed, diverge, color };
+    return { pending, confirmed, color };
   }
 
   function cellFor(accountId: string, date: string): { color: CellColor; recId: string | null } {
@@ -184,10 +195,25 @@ function List() {
   }
 
   const { accts, recs } = data;
-  const since7 = isoShift(today, -6);
   const days: string[] = [];
   for (let i = CAL_BACK; i >= 0; i--) days.push(isoShift(today, -i));
   for (let i = 1; i <= CAL_FWD; i++) days.push(isoShift(today, i));
+
+  // Últimos 7 dias corridos (até hoje) — subconjunto exato de `days`, então as
+  // contagens do card são as mesmas células que o calendário desenha.
+  const cardDays: string[] = [];
+  for (let i = CARD_DAYS - 1; i >= 0; i--) cardDays.push(isoShift(today, -i));
+
+  // Conta, por conta bancária, quantos dos últimos 7 dias caem em cada cor —
+  // usando cellFor(), a MESMA função que pinta o calendário.
+  function cardTally(accountId: string): Map<CellColor, number> {
+    const tally = new Map<CellColor, number>();
+    for (const d of cardDays) {
+      const { color } = cellFor(accountId, d);
+      tally.set(color, (tally.get(color) ?? 0) + 1);
+    }
+    return tally;
+  }
 
   const visibleAccts = selectedAccts ? accts.filter((a) => selectedAccts.has(a.id)) : accts;
 
@@ -238,10 +264,7 @@ function List() {
             const lc = data.lastClosed[a.id];
             const saldo = lc ? (lc.balance_agrotis_calculated ?? lc.balance_agrotis_previous ?? lc.balance_bank) : null;
             const dias = lc ? diffDays(today, lc.reconciliation_date) : null;
-            const recs7 = recs.filter((r) => r.bank_account_id === a.id && r.reconciliation_date >= since7);
-            const fechadas = recs7.filter((r) => r.status === "fechada").length;
-            const pendencias = recs7.filter((r) => r.status === "fechada" && r.closed_with_pending).length;
-            const divergencias = recs7.filter((r) => recInfo(r).diverge && r.status === "fechada").length;
+            const tally = cardTally(a.id);
             return (
               <Card key={a.id} className="p-4">
                 <div className="text-sm font-medium">{a.bank}</div>
@@ -252,10 +275,17 @@ function List() {
                 <div className="mt-1 text-xs text-muted-foreground">
                   {dias == null ? "Nunca conciliado" : dias === 0 ? "Conciliado hoje" : `Conciliado há ${dias} dia${dias === 1 ? "" : "s"}`}
                 </div>
-                <div className="mt-3 flex items-center gap-3 text-xs">
-                  <span className="text-emerald-600"><strong>{fechadas}</strong> fechadas</span>
-                  <span className="text-amber-600"><strong>{pendencias}</strong> pendências</span>
-                  <span className="text-rose-600"><strong>{divergencias}</strong> diverg.</span>
+                <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                  {CARD_KINDS.map(({ color, one, many }) => {
+                    const n = tally.get(color) ?? 0;
+                    if (n === 0) return null;
+                    return (
+                      <span key={color} className="flex items-center gap-1 whitespace-nowrap">
+                        <span className={`h-2.5 w-2.5 shrink-0 rounded-sm ${CELL_CLASS[color]}`} />
+                        <strong>{n}</strong> {n === 1 ? one : many}
+                      </span>
+                    );
+                  })}
                   <span className="ml-auto text-muted-foreground">7 dias</span>
                 </div>
               </Card>

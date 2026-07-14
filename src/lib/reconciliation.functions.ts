@@ -677,20 +677,42 @@ export const deleteReconciliation = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-// Reabre uma conciliação SUBSTITUINDO seus lançamentos/casamentos pelos extraídos
-// de novos extratos. Apenas o Diretor pode executar. Ação destrutiva: apaga todos
-// os reconciliation_entries e reconciliation_matches antes de reprocessar.
+// Reabre uma conciliação SUBSTITUINDO os lançamentos/casamentos de UM lado
+// ("bb" ou "agrotis") ou dos dois ("both"). Apenas o Diretor pode executar.
+//
+// Em todos os casos os casamentos são refeitos do zero — mesmo no modo de um lado
+// só, porque um lançamento que continua no banco pode passar a casar com outro
+// par. O lado NÃO alterado tem seus lançamentos preservados (mesmos ids), então
+// só o lado trocado é reinserido.
+export type ReopenSide = "bb" | "agrotis" | "both";
 export const reopenWithNewFiles = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((d: unknown) => z.object({
-    reconciliationId: z.string().uuid(),
-    bbFileName: z.string(),
-    bbEntries: z.array(AiEntry),
-    agrotisFileName: z.string(),
-    agrotisEntries: z.array(AiEntry),
-    balanceBank: z.number().nullable().optional(),
-    balanceAgrotisPrevious: z.number().nullable().optional(),
-  }).parse(d))
+  .inputValidator((d: unknown) => z.discriminatedUnion("side", [
+    z.object({
+      side: z.literal("bb"),
+      reconciliationId: z.string().uuid(),
+      bbFileName: z.string(),
+      bbEntries: z.array(AiEntry),
+      balanceBank: z.number().nullable().optional(),
+    }),
+    z.object({
+      side: z.literal("agrotis"),
+      reconciliationId: z.string().uuid(),
+      agrotisFileName: z.string(),
+      agrotisEntries: z.array(AiEntry),
+      balanceAgrotisPrevious: z.number().nullable().optional(),
+    }),
+    z.object({
+      side: z.literal("both"),
+      reconciliationId: z.string().uuid(),
+      bbFileName: z.string(),
+      bbEntries: z.array(AiEntry),
+      agrotisFileName: z.string(),
+      agrotisEntries: z.array(AiEntry),
+      balanceBank: z.number().nullable().optional(),
+      balanceAgrotisPrevious: z.number().nullable().optional(),
+    }),
+  ]).parse(d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const { data: isDir } = await supabase.rpc("has_role", { _user_id: userId, _role: "diretor" });
@@ -700,34 +722,82 @@ export const reopenWithNewFiles = createServerFn({ method: "POST" })
       .select("id").eq("id", data.reconciliationId).single();
     if (rErr || !rec) throw new Error(rErr?.message || "Conciliação não encontrada");
 
-    // Casa os novos lançamentos ANTES de apagar os antigos: se o casamento falhar,
-    // a conciliação permanece intacta.
-    const parsed = await extractReconciliation(data.bbEntries, data.agrotisEntries);
+    const side = data.side;
+    const newBb = side === "agrotis" ? null : data.bbEntries;
+    const newAg = side === "bb" ? null : data.agrotisEntries;
 
-    // Apaga casamentos e lançamentos atuais. (Apagar os lançamentos já removeria
-    // os casamentos por cascade, mas removemos os matches explicitamente primeiro
-    // para cobrir também os de lado único, no_pair.)
+    // Lado preservado: lê do banco os lançamentos que NÃO serão trocados. A ordem
+    // é fixada aqui e reusada como espaço de índices do matcher e para remapear os
+    // ids — as duas coisas saem do MESMO array, então não podem sair de sincronia.
+    const keepSource = side === "bb" ? "agrotis" : side === "agrotis" ? "bb" : null;
+    let keptRows: Array<{
+      id: string; entry_date: string | null; description: string | null; beneficiary: string | null;
+      amount: number | string; entry_type: "C" | "D"; document_ref: string | null;
+    }> = [];
+    if (keepSource) {
+      const { data: rows, error } = await supabase.from("reconciliation_entries")
+        .select("id, entry_date, description, beneficiary, amount, entry_type, document_ref")
+        .eq("reconciliation_id", rec.id).eq("source", keepSource)
+        .order("created_at").order("id");
+      if (error) throw new Error(error.message);
+      keptRows = rows ?? [];
+      if (!keptRows.length) {
+        const nome = keepSource === "bb" ? "Banco do Brasil" : "Agrotis";
+        throw new Error(
+          `Esta conciliação não tem lançamentos do ${nome} para preservar. ` +
+          `Reabra alterando os dois extratos.`,
+        );
+      }
+    }
+    // amount vem como numeric do Postgres: força para número, que é o que o
+    // matcher espera (ele soma/subtrai valores).
+    const keptEntries: Entry[] = keptRows.map((r) => ({
+      entry_date: r.entry_date,
+      description: r.description ?? "",
+      beneficiary: r.beneficiary,
+      amount: Number(r.amount),
+      entry_type: r.entry_type,
+      document_ref: r.document_ref,
+    }));
+
+    // Casa ANTES de apagar qualquer coisa: se o matching falhar, a conciliação
+    // permanece intacta.
+    const bbInput = newBb ?? keptEntries;
+    const agInput = newAg ?? keptEntries;
+    const parsed = await extractReconciliation(bbInput, agInput);
+
+    // Apaga TODOS os casamentos (os índices dos dois lados mudam) e só os
+    // lançamentos do lado trocado. (O delete dos lançamentos já levaria os
+    // casamentos por cascade, mas apagamos os matches explicitamente primeiro para
+    // cobrir também os de lado único, no_pair, e os do lado preservado.)
     const { error: delMErr } = await supabase.from("reconciliation_matches")
       .delete().eq("reconciliation_id", rec.id);
     if (delMErr) throw new Error(delMErr.message);
-    const { error: delEErr } = await supabase.from("reconciliation_entries")
-      .delete().eq("reconciliation_id", rec.id);
+
+    const delE = supabase.from("reconciliation_entries").delete().eq("reconciliation_id", rec.id);
+    const { error: delEErr } = await (side === "both" ? delE : delE.eq("source", side));
     if (delEErr) throw new Error(delEErr.message);
 
-    // Reinsere lançamentos e sugestões (mesma lógica de processReconciliation).
-    const bbInserts = parsed.bb_entries.map((e) => ({ reconciliation_id: rec.id, source: "bb" as const, ...e }));
-    const agInserts = parsed.agrotis_entries.map((e) => ({ reconciliation_id: rec.id, source: "agrotis" as const, ...e }));
-    const { data: bbRows, error: bbErr } = await supabase.from("reconciliation_entries").insert(bbInserts).select();
-    if (bbErr) throw new Error(bbErr.message);
-    const { data: agRows, error: agErr } = await supabase.from("reconciliation_entries").insert(agInserts).select();
-    if (agErr) throw new Error(agErr.message);
+    // Reinsere só o lado trocado. Os ids de cada lado ficam alinhados com o espaço
+    // de índices que o matcher usou (bbInput / agInput).
+    async function insertSide(source: "bb" | "agrotis", entries: Entry[]): Promise<string[]> {
+      if (!entries.length) return [];
+      const { data: rows, error } = await supabase.from("reconciliation_entries")
+        .insert(entries.map((e) => ({ reconciliation_id: rec!.id, source, ...e })))
+        .select("id");
+      if (error) throw new Error(error.message);
+      return (rows ?? []).map((r) => r.id);
+    }
+    const keptIds = keptRows.map((r) => r.id);
+    const bbIds = newBb ? await insertSide("bb", newBb) : keptIds;
+    const agIds = newAg ? await insertSide("agrotis", newAg) : keptIds;
 
     const matchInserts = parsed.matches
-      .filter((m) => bbRows?.[m.bb_index] && agRows?.[m.agrotis_index])
+      .filter((m) => bbIds[m.bb_index] && agIds[m.agrotis_index])
       .map((m) => ({
         reconciliation_id: rec.id,
-        bb_entry_id: bbRows![m.bb_index].id,
-        agrotis_entry_id: agRows![m.agrotis_index].id,
+        bb_entry_id: bbIds[m.bb_index],
+        agrotis_entry_id: agIds[m.agrotis_index],
         confidence: m.confidence,
         status: "suggested" as const,
         reason: m.reason,
@@ -737,25 +807,38 @@ export const reopenWithNewFiles = createServerFn({ method: "POST" })
       if (mErr) throw new Error(mErr.message);
     }
 
-    // Reabre e atualiza arquivos/saldos. O saldo calculado do Agrotis é zerado
-    // para ser recomputado no próximo fechamento com os novos lançamentos.
-    const { error: updErr } = await supabase.from("reconciliations").update({
+    // Reabre e atualiza arquivo/saldo APENAS do lado trocado. O saldo calculado do
+    // Agrotis é zerado para ser recomputado no próximo fechamento.
+    const upd: {
+      status: "reaberta"; reopened_at: string; reopened_by: string;
+      balance_agrotis_calculated: null;
+      bb_file_name?: string; balance_bank?: number | null;
+      agrotis_file_name?: string; balance_agrotis_previous?: number | null;
+    } = {
       status: "reaberta",
       reopened_at: new Date().toISOString(),
       reopened_by: userId,
-      bb_file_name: data.bbFileName,
-      agrotis_file_name: data.agrotisFileName,
-      balance_bank: data.balanceBank ?? null,
-      balance_agrotis_previous: data.balanceAgrotisPrevious ?? null,
       balance_agrotis_calculated: null,
-    }).eq("id", data.reconciliationId);
+    };
+    if (side !== "agrotis") {
+      upd.bb_file_name = data.bbFileName;
+      upd.balance_bank = data.balanceBank ?? null;
+    }
+    if (side !== "bb") {
+      upd.agrotis_file_name = data.agrotisFileName;
+      upd.balance_agrotis_previous = data.balanceAgrotisPrevious ?? null;
+    }
+    const { error: updErr } = await supabase.from("reconciliations").update(upd).eq("id", rec.id);
     if (updErr) throw new Error(updErr.message);
 
     await supabase.from("reconciliation_audit_log").insert({
-      reconciliation_id: data.reconciliationId, user_id: userId, action: "reopened_with_new_files",
+      reconciliation_id: rec.id, user_id: userId, action: "reopened_with_new_files",
       details: {
-        bb_file: data.bbFileName, agrotis_file: data.agrotisFileName,
-        bb: bbRows?.length, agrotis: agRows?.length, matches: matchInserts.length,
+        side,
+        bb_file: side !== "agrotis" ? data.bbFileName : undefined,
+        agrotis_file: side !== "bb" ? data.agrotisFileName : undefined,
+        bb: bbIds.length, agrotis: agIds.length, matches: matchInserts.length,
+        preservados: keepSource ? `${keptIds.length} do ${keepSource}` : undefined,
       },
     });
 
