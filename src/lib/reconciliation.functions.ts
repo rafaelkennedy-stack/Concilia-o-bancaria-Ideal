@@ -212,9 +212,26 @@ export const processReconciliation = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => ProcessInput.parse(d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
+
+    // A conciliação do dia processa SÓ os lançamentos do BB daquele dia. Assim a
+    // Dani pode subir um extrato (OFX/planilha) que cobre vários dias e a
+    // conciliação de 14/07 usa apenas os lançamentos de 14/07 — os demais dias são
+    // ignorados aqui e ficam para as respectivas conciliações. (No modo em massa
+    // NÃO se filtra: lá a conciliação cobre o período inteiro de propósito.)
+    //
+    // O filtro é feito ANTES de extractReconciliation porque o casamento é por
+    // ÍNDICE entre os arrays bb/agrotis; filtrar depois desalinharia os índices.
+    // entry_date e reconciliationDate estão ambos em ISO (YYYY-MM-DD).
+    const bbForDay = data.bbEntries.filter((e) => e.entry_date === data.reconciliationDate);
+    const dropped = data.bbEntries.length - bbForDay.length;
+    console.log(
+      `[processReconciliation] BB: ${bbForDay.length}/${data.bbEntries.length} lançamentos em ${data.reconciliationDate}` +
+      (dropped ? ` (${dropped} de outros dias ignorados)` : ""),
+    );
+
     // Lançamentos já vêm estruturados do cliente (tipo/valor determinísticos);
     // extractReconciliation só faz o casamento (pré-match + IA por nome).
-    const parsed = await extractReconciliation(data.bbEntries, data.agrotisEntries);
+    const parsed = await extractReconciliation(bbForDay, data.agrotisEntries);
 
     // Fetch bank account to derive account label
     const { data: acct, error: acctErr } = await supabase
@@ -995,6 +1012,9 @@ export const processMassReconciliation = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => MassInput.parse(d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
+    // SEM filtro por dia (ao contrário de processReconciliation): a conciliação em
+    // massa cobre o período inteiro e usa todos os lançamentos; a divisão por dia
+    // acontece depois, no fechamento (closeMassReconciliation).
     const parsed = await extractReconciliation(data.bbEntries, data.agrotisEntries);
 
     const { data: acct, error: acctErr } = await supabase
