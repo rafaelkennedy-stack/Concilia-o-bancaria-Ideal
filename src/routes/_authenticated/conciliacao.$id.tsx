@@ -1183,8 +1183,8 @@ function ReopenDialog({ id, onReopened }: { id: string; onReopened: () => void }
 
         {needBb && (
           <ReopenFileField
-            label="Novo extrato do banco (.ofx recomendado, .xlsx ou .xls)"
-            accept=".ofx,.xlsx,.xls"
+            label="Novo extrato do banco (.ofx recomendado, .xlsx, .xls ou .pdf)"
+            accept=".ofx,.xlsx,.xls,.pdf"
             file={bb} onChange={setBb} disabled={busy}
           />
         )}

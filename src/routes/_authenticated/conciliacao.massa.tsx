@@ -110,7 +110,7 @@ function Mass() {
               )}
             </div>
             <FileField
-              label="Extrato do banco (.ofx recomendado, .xlsx ou .xls)" accept=".ofx,.xlsx,.xls"
+              label="Extrato do banco (.ofx recomendado, .xlsx, .xls ou .pdf)" accept=".ofx,.xlsx,.xls,.pdf"
               file={bb} onChange={setBB}
             />
             <FileField

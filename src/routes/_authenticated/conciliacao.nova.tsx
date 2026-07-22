@@ -126,7 +126,7 @@ function New() {
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
             </div>
             <FileField
-              label="Extrato do banco (.ofx recomendado, .xlsx ou .xls)" accept=".ofx,.xlsx,.xls"
+              label="Extrato do banco (.ofx recomendado, .xlsx, .xls ou .pdf)" accept=".ofx,.xlsx,.xls,.pdf"
               file={bb} onChange={setBB}
             />
             <FileField

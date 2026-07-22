@@ -8,10 +8,17 @@
 // comum): ZIP => .xlsx, OLE/BIFF => .xls, qualquer outra coisa => texto (CSV).
 const MAGIC_XLSX = [0x50, 0x4b];              // "PK"  — zip
 const MAGIC_XLS = [0xd0, 0xcf, 0x11, 0xe0];   // OLE2 compound file
+const MAGIC_PDF = [0x25, 0x50, 0x44, 0x46];   // "%PDF"
 
 function isBinaryWorkbook(bytes: Uint8Array): boolean {
   const comeca = (sig: number[]) => sig.every((b, i) => bytes[i] === b);
   return comeca(MAGIC_XLSX) || comeca(MAGIC_XLS);
+}
+
+// PDF é binário mas NÃO é planilha: detectá-lo pelos magic bytes evita que ele caia
+// no caminho de CSV (todo arquivo não-binário-de-planilha é tratado como texto).
+function isPdf(bytes: Uint8Array): boolean {
+  return MAGIC_PDF.every((b, i) => bytes[i] === b);
 }
 
 // CSV precisa ser decodificado por NÓS antes de entregar ao SheetJS.
@@ -102,6 +109,79 @@ function parseOfxBalance(text: string): number | null {
   const bloco = text.match(/<LEDGERBAL>([\s\S]*?)<\/LEDGERBAL>/i);
   if (!bloco) return null;
   return ofxAmount(ofxTag(bloco[1], "BALAMT"));
+}
+
+// ---- Sicoob (extrato em PDF) --------------------------------------------------
+//
+// O extrato do Sicoob é orientado a LINHA: cada lançamento é
+// "DD/MM HISTÓRICO VALOR[C/D]", com o tipo colado no fim do valor —
+// "1.234,56D" = débito, "1.234,56C" = crédito. Não há coluna de sinal nem separador
+// de campos, então a leitura é por regex sobre o texto achatado do PDF (parsePdf).
+function isSicoob(text: string): boolean {
+  const inicio = text.slice(0, 2048).toUpperCase();
+  return inicio.includes("SICOOB") || inicio.includes("SISBR");
+}
+
+// O ano não aparece nas linhas de lançamento (só DD/MM). Extraímos do cabeçalho a
+// primeira data completa (DD/MM/AAAA); na falta dela, usamos o ano atual.
+function sicoobYear(text: string): string {
+  const m = text.match(/\b\d{2}\/\d{2}\/(\d{4})\b/);
+  return m ? m[1] : String(new Date().getFullYear());
+}
+
+// Linhas de saldo/detalhamento intercaladas no movimento: são puladas uma a uma.
+// Testadas por conteúdo (não só pelo início) porque um "SALDO DO DIA" pode vir
+// precedido de data e casaria com o formato de lançamento.
+const SICOOB_SKIP = /SALDO DO DIA|SALDO ANTERIOR|SALDO BLOQ\.?\s*ANTERIOR/i;
+// Seções que encerram o movimento efetivado: "RESUMO" (totais) e "LANÇAMENTOS
+// FUTUROS" (agendados, ainda não liquidados) vêm SEMPRE ao final. Ao alcançá-las
+// paramos de coletar — senão os agendados entrariam como lançamentos-fantasma que
+// não casam com nada na conciliação.
+const SICOOB_END = /RESUMO|LAN[ÇC]AMENTOS FUTUROS/i;
+const SICOOB_LINE = /^(\d{2})\/(\d{2})\s+(.+?)\s+(-?[\d.]+,\d{2})([CD])\s*$/;
+
+function parseSicoobEntries(text: string): ParsedEntry[] {
+  const out: ParsedEntry[] = [];
+  const year = sicoobYear(text);
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (SICOOB_END.test(line)) break;
+    if (/^DOC\.:/i.test(line)) continue;
+    if (SICOOB_SKIP.test(line)) continue;
+    const m = line.match(SICOOB_LINE);
+    if (!m) continue;                       // sem data no início => ignora
+    const [, dd, mm, hist, valor, cd] = m;
+    const amount = parseBRNumber(valor);
+    if (amount == null) continue;
+    out.push({
+      entry_date: `${year}-${mm}-${dd}`,
+      description: hist.trim(),
+      beneficiary: null,
+      amount: Math.abs(amount),
+      entry_type: cd.toUpperCase() === "D" ? "D" : "C",   // C/D colado no valor
+      document_ref: null,
+    });
+  }
+  return out;
+}
+
+// Saldo final: a linha "SALDO EM CONTA:" quando existe; senão o último "SALDO DO
+// DIA" do período. O C/D ao fim do número define o sinal (D = negativo).
+function parseSicoobBalance(text: string): number | null {
+  const readSaldo = (line: string): number | null => {
+    const m = line.match(/(-?[\d.]+,\d{2})([CD])?\s*$/);
+    if (!m) return null;
+    const n = parseBRNumber(m[1]);
+    if (n == null) return null;
+    return m[2] === "D" ? -Math.abs(n) : Math.abs(n);
+  };
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const conta = lines.find((l) => /SALDO EM CONTA/i.test(l));
+  if (conta) { const n = readSaldo(conta); if (n != null) return n; }
+  let last: number | null = null;
+  for (const l of lines) if (/SALDO DO DIA/i.test(l)) { const n = readSaldo(l); if (n != null) last = n; }
+  return last;
 }
 
 // Descobre o separador do CSV. Não dá para confiar no palpite do SheetJS: extratos
@@ -250,6 +330,11 @@ export async function parseBbEntries(file: File): Promise<ParsedEntry[]> {
   // OFX é texto: precisa ser desviado ANTES de readBankWorkbook, que trataria o
   // arquivo como CSV.
   const bytes = new Uint8Array(await file.arrayBuffer());
+  if (isPdf(bytes)) {
+    const text = await parsePdf(file);
+    if (isSicoob(text)) return parseSicoobEntries(text);
+    throw new Error("Formato de PDF bancário não reconhecido");
+  }
   if (!isBinaryWorkbook(bytes)) {
     const text = decodeText(bytes);
     if (isOfx(text)) return parseOfxEntries(text);
@@ -360,9 +445,14 @@ function parseSicrediSheet(
 // Saldo do extrato bancário, seja qual for o formato. As telas chamam SÓ isto e não
 // precisam saber com que arquivo estão lidando:
 //   - OFX  => <LEDGERBAL><BALAMT> (número explícito, sem heurística)
+//   - PDF Sicoob => "SALDO EM CONTA:" ou o último "SALDO DO DIA" do período
 //   - .xlsx/.xls/.csv => procura a linha "SALDO" no texto achatado
 export async function extractBankBalanceFromFile(file: File): Promise<number | null> {
   const bytes = new Uint8Array(await file.arrayBuffer());
+  if (isPdf(bytes)) {
+    const text = await parsePdf(file);
+    return isSicoob(text) ? parseSicoobBalance(text) : null;
+  }
   if (!isBinaryWorkbook(bytes)) {
     const text = decodeText(bytes);
     if (isOfx(text)) return parseOfxBalance(text);
